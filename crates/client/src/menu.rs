@@ -39,8 +39,13 @@ pub struct WikiRoot;
 pub enum MenuButton {
     Play,
     Wiki,
+    Update,
     Quit,
 }
+
+/// Подпись под кнопкой обновления: что сейчас происходит.
+#[derive(Component)]
+pub struct UpdateStatus;
 
 #[derive(Component)]
 pub struct WikiTab {
@@ -104,6 +109,9 @@ pub fn setup_menu(mut commands: Commands, font: Res<UiFont>) {
             for (button, label) in [
                 (MenuButton::Play, "ИГРАТЬ"),
                 (MenuButton::Wiki, "СПРАВОЧНИК"),
+                // Текст на этой кнопке переписывается на ходу: она же
+                // проверяет, она же ставит, она же просит перезапуск.
+                (MenuButton::Update, "ПРОВЕРИТЬ ОБНОВЛЕНИЕ"),
                 (MenuButton::Quit, "ВЫХОД"),
             ] {
                 root.spawn((
@@ -123,6 +131,9 @@ pub fn setup_menu(mut commands: Commands, font: Res<UiFont>) {
                 ));
             }
 
+            // Строка состояния обновления. Пустой она не бывает: пока ничего
+            // не происходит, здесь просто написано, какая версия установлена.
+            root.spawn((UpdateStatus, text(font, 11.0, DIM, &version::full())));
             root.spawn(text(font, 12.0, DIM, &mutation_count_line()));
             root.spawn(text(
                 font,
@@ -131,6 +142,38 @@ pub fn setup_menu(mut commands: Commands, font: Res<UiFont>) {
                 "новичку: открой справочник и прочитай «С чего начать» — это две минуты",
             ));
         });
+}
+
+/// Держит кнопку обновления и строку под ней в согласии с тем, что делает
+/// обновлятор: он работает в своём потоке, а меню просто показывает его
+/// состояние.
+pub fn update_menu_status(
+    updater: Res<crate::update::Updater>,
+    mut buttons: Query<(&MenuButton, &mut Text, &mut BackgroundColor), Without<UpdateStatus>>,
+    mut status: Query<&mut Text, With<UpdateStatus>>,
+) {
+    for (button, mut text, mut background) in &mut buttons {
+        if !matches!(button, MenuButton::Update) {
+            continue;
+        }
+        let label = updater.as_ref().button_label();
+        if text.0 != label {
+            text.0 = label;
+        }
+        // Пока идёт проверка или закачка, кнопка гаснет: нажимать её больше
+        // незачем, и это должно быть видно, а не только написано.
+        background.0 = if updater.as_ref().busy() {
+            Color::srgba(1.0, 1.0, 1.0, 0.03)
+        } else {
+            Color::srgba(1.0, 1.0, 1.0, 0.07)
+        };
+    }
+    if let Ok(mut text) = status.single_mut() {
+        let line = updater.as_ref().status_line();
+        if text.0 != line {
+            text.0 = line;
+        }
+    }
 }
 
 pub fn setup_wiki(mut commands: Commands, font: Res<UiFont>, preview: Res<PreviewImage>) {
@@ -361,6 +404,7 @@ pub fn menu_input(
     keys: Res<ButtonInput<KeyCode>>,
     mut next: ResMut<NextState<Screen>>,
     mut exit: MessageWriter<AppExit>,
+    mut updater: ResMut<crate::update::Updater>,
 ) {
     let mut chosen = None;
     for (interaction, button) in &buttons {
@@ -378,6 +422,7 @@ pub fn menu_input(
     match chosen {
         Some(MenuButton::Play) => next.set(Screen::Game),
         Some(MenuButton::Wiki) => next.set(Screen::Wiki),
+        Some(MenuButton::Update) => crate::update::act(&mut updater),
         Some(MenuButton::Quit) => {
             exit.write(AppExit::Success);
         }

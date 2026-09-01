@@ -1,0 +1,192 @@
+# Сборка и публикация релиза под Linux и Windows.
+#
+# Запускается тремя способами:
+#   * пуш тега `v*` — собирает и публикует релиз;
+#   * кнопка «Run workflow» — собирает и кладёт архивы в артефакты сборки,
+#     релиз не создаёт. Это и есть тестовая сборка;
+#   * пуш в main и pull request — только тесты и clippy, без сборки дистрибутива.
+#
+# Windows собирается на windows-раннере нативно, а не кросс-компиляцией из
+# Linux, как это делает `scripts/build-windows.sh`. Тому нужен Docker и образ
+# `cross`, а здесь машина с нужным тулчейном уже есть — незачем городить
+# контейнер внутри контейнера.
+#
+# Архив плоский: обновлятор в игре раскладывает его файлы поверх установленных,
+# сохраняя имена (`crates/client/src/update.rs`). Имена архивов зашиты в
+# константе `ASSET` там же, и за их совпадением следит тест
+# `asset_name_matches_the_workflow` — он читает этот файл.
+
+name: Сборка и релиз
+
+on:
+  push:
+    branches: [main]
+    # И `v0.2.0`, и `0.2.0`: в репозитории уже есть тег без префикса, а игре
+    # всё равно — она отбрасывает ведущую `v` при сравнении версий.
+    tags: ['v*', '[0-9]*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Отладочная информация в релизном бинарнике весит больше самого кода, а
+  # игроку не нужна.
+  CARGO_PROFILE_RELEASE_DEBUG: none
+
+jobs:
+  # ─────────────────────────────────────────────
+  # Проверки. Идут всегда и первыми: нет смысла собирать дистрибутив из кода,
+  # который не проходит собственные тесты.
+  # ─────────────────────────────────────────────
+  check:
+    name: Тесты и clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Системные библиотеки
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev
+      - name: Тесты
+        run: cargo test --workspace --all-targets
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
+
+  # ─────────────────────────────────────────────
+  # Дистрибутивы. Только для тега или ручного запуска: гонять получасовую
+  # сборку Bevy на каждый коммит незачем.
+  # ─────────────────────────────────────────────
+  build:
+    name: Сборка ${{ matrix.name }}
+    needs: check
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    strategy:
+      # Одна упавшая платформа не должна отменять вторую: полезнее увидеть,
+      # что сломалось только на Windows, чем не увидеть ничего.
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+            asset: cellborn-linux-x86_64.zip
+          - name: Windows
+            os: windows-latest
+            asset: cellborn-windows-x86_64.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Системные библиотеки
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev
+
+      # Версия в бинарнике — это то, с чем обновлятор у игрока сравнивает тег
+      # релиза. Разойдутся — игра будет вечно предлагать «обновиться» до уже
+      # установленного. Ловим здесь, до публикации, а не у игроков.
+      - name: Тег совпадает с версией в Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "$tag" != "$crate" ]; then
+            echo "Тег $GITHUB_REF_NAME не совпадает с version = \"$crate\" в Cargo.toml."
+            echo "Поправь версию в Cargo.toml и пересоздай тег."
+            exit 1
+          fi
+
+      - name: Сборка
+        run: cargo build --release --workspace
+
+      - name: Комплект (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist
+          cp target/release/cellborn-client target/release/cellborn-server dist/
+          # Без strip клиент весит больше двухсот мегабайт: почти всё это —
+          # отладочные символы, которые игроку не нужны.
+          strip dist/cellborn-client dist/cellborn-server
+          cp scripts/windows/cellborn-server.cfg dist/
+          cp docs/MECHANICS.md dist/МЕХАНИКА.txt
+          cp docs/TESTING.md dist/ЧТО-ПРОВЕРИТЬ.txt
+          cat > dist/играть.sh <<'SH'
+          #!/usr/bin/env bash
+          # Запускает сервер и клиент вместе; сервер гасится вместе с игрой.
+          cd "$(dirname "$0")"
+          ./cellborn-server & SERVER=$!
+          trap 'kill $SERVER 2>/dev/null' EXIT
+          sleep 1
+          ./cellborn-client "$@"
+          SH
+          chmod +x dist/играть.sh
+          cd dist && zip -r -9 "../${{ matrix.asset }}" .
+
+      - name: Комплект (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release/cellborn-client.exe, target/release/cellborn-server.exe dist/
+          Copy-Item scripts/windows/*.bat dist/
+          Copy-Item scripts/windows/cellborn-server.cfg dist/
+          Copy-Item scripts/windows/ЧИТАТЬ.txt dist/
+          Copy-Item docs/MECHANICS.md dist/МЕХАНИКА.txt
+          Copy-Item docs/TESTING.md dist/ЧТО-ПРОВЕРИТЬ.txt
+          # Тексты — с CRLF, иначе блокнот покажет их одной строкой.
+          Get-ChildItem dist/*.txt, dist/*.cfg | ForEach-Object {
+            $body = (Get-Content $_.FullName -Raw) -replace "`r`n", "`n" -replace "`n", "`r`n"
+            Set-Content -Path $_.FullName -Value $body -NoNewline
+          }
+          Compress-Archive -Path dist/* -DestinationPath "${{ matrix.asset }}" -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  # ─────────────────────────────────────────────
+  # Публикация. Только по тегу.
+  # ─────────────────────────────────────────────
+  release:
+    name: Публикация релиза
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      # Единственное, что этому заданию нужно, — создать релиз. Токен по
+      # умолчанию только для чтения.
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Релиз
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.zip
+          generate_release_notes: true
+          body: |
+            Скачай архив для своей системы, распакуй и запусти:
+            **Windows** — `ИГРАТЬ.bat`, **Linux** — `играть.sh`.
+
+            Уже играешь? Не качай руками: в главном меню есть
+            «Проверить обновление» — игра скачает и поставит эту версию сама.
+            Твой `cellborn-server.cfg` при этом не тронется, а новые настройки,
+            если они появились, сервер допишет в него сам.

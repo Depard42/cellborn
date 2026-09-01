@@ -12,3 +12,8 @@ rand.workspace = true
 tracing.workspace = true
 lightyear.workspace = true
 cellborn-common = { path = "../common" }
+
+# Проверка и установка обновлений из релизов GitHub.
+ureq.workspace = true
+serde_json.workspace = true
+zip.workspace = true

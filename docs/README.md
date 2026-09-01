@@ -27,8 +27,14 @@ Multiplayer cell-stage prototype inspired by the *design space* of cell-evolutio
 - Spiteful mutations: a toxin gland poisons the water everyone swims through.
 - An F1 debug overlay: client frame rate, what the client can actually see, and
   the server's own tick time, population and food count sent alongside it.
+- Version stamped into the binary, and an in-game updater: the main menu checks
+  GitHub releases, downloads the build for your platform and installs it over
+  itself. The server config is never touched — new settings are appended to the
+  player's own file instead.
+- Linux and Windows builds are made by GitHub Actions and published as releases.
 - See `docs/MECHANICS.md` for how it all works, `docs/TESTING.md` for what to
-  check by hand, and `docs/PERFORMANCE.md` for what the server costs and why.
+  check by hand, `docs/PERFORMANCE.md` for what the server costs and why, and
+  `docs/RELEASING.md` for how a version gets built and shipped.
 
 ## Run
 
@@ -60,10 +66,21 @@ shuts the server down with the game:
 ./scripts/run.sh client 192.168.1.10:5555
 ```
 
-## Windows build
+## Releases
 
-Cross-compiled from Linux with [`cross`](https://github.com/cross-rs/cross) (it runs
-the build in Docker, so the daemon has to be up):
+Tag a version and GitHub Actions builds both platforms and publishes the release:
+
+```bash
+git tag v0.2.0 && git push origin v0.2.0     # version must match Cargo.toml
+```
+
+Players update from inside the game — see `docs/RELEASING.md`.
+
+## Windows build, by hand
+
+Only needed to test a build locally; releases come from CI. Cross-compiled from
+Linux with [`cross`](https://github.com/cross-rs/cross) (it runs the build in
+Docker, so the daemon has to be up):
 
 ```bash
 cargo install cross --git https://github.com/cross-rs/cross

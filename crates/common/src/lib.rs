@@ -5,6 +5,7 @@ pub mod network;
 pub mod organism;
 pub mod protocol;
 pub mod simulation;
+pub mod version;
 
 pub use balance::*;
 pub use environment::*;
@@ -13,3 +14,4 @@ pub use network::*;
 pub use organism::*;
 pub use protocol::*;
 pub use simulation::*;
+pub use version::*;

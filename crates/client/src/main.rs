@@ -4,6 +4,7 @@ mod debug;
 mod fx;
 mod menu;
 mod ui;
+mod update;
 mod wiki;
 mod world;
 
@@ -62,7 +63,10 @@ fn main() {
     app.add_systems(OnExit(Screen::Menu), menu::despawn::<menu::MenuRoot>);
     app.add_systems(OnEnter(Screen::Wiki), menu::setup_wiki);
     app.add_systems(OnExit(Screen::Wiki), menu::despawn::<menu::WikiRoot>);
-    app.add_systems(Update, menu::menu_input.run_if(in_state(Screen::Menu)));
+    app.add_systems(
+        Update,
+        (menu::menu_input, menu::update_menu_status).run_if(in_state(Screen::Menu)),
+    );
     app.add_systems(
         Update,
         (menu::wiki_input, menu::update_wiki, menu::update_atlas, atlas::rebuild_preview)
@@ -73,6 +77,7 @@ fn main() {
     ui::install_font(&mut app);
     // После установки шрифта: панель отладки собирается в `Startup` и просит его.
     app.add_plugins(debug::plugin);
+    app.add_plugins(update::plugin);
     app.add_systems(Startup, (setup_camera, world::setup_world, atlas::setup_preview));
     app.add_systems(OnEnter(Screen::Game), (ui::setup_hud, connect_client));
     app.add_systems(OnExit(Screen::Game), menu::despawn::<ui::GameUi>);

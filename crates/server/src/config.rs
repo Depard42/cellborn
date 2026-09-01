@@ -61,6 +61,38 @@ macro_rules! settings {
             }
         }
 
+        /// Настройки, которых нет в файле, — текстом, готовым к дописыванию.
+        ///
+        /// Файл принадлежит пользователю: он его правил, расставлял свои
+        /// комментарии, менял порядок. Перезаписывать его целиком нельзя, а
+        /// молча не давать доступа к новым настройкам — тоже: человек о них
+        /// просто не узнает. Поэтому дописываем в конец только недостающее,
+        /// с тем же описанием, что и в сгенерированном файле.
+        fn missing_settings(present: &[String]) -> Option<String> {
+            let defaults = ServerConfig::default();
+            let mut text = String::new();
+            $(
+                // Сначала раздел целиком, потом заголовок — иначе в файл
+                // попадали бы заголовки разделов, под которыми ничего нет.
+                let mut section = String::new();
+                $(
+                    if !present.iter().any(|key| key == stringify!($key)) {
+                        section.push_str(&format!(
+                            "\n# {}\n{} = {}\n",
+                            $doc,
+                            stringify!($key),
+                            defaults.$key
+                        ));
+                    }
+                )*
+                if !section.is_empty() {
+                    text.push_str(&format!("\n# --- {} ---\n", $section));
+                    text.push_str(&section);
+                }
+            )*
+            (!text.is_empty()).then_some(text)
+        }
+
         fn apply(key: &str, value: &str, config: &mut ServerConfig) {
             match key {
                 $($(
@@ -195,6 +227,58 @@ fn parse(text: &str, config: &mut ServerConfig) {
     }
 }
 
+/// Какие ключи в файле реально заданы — с точки зрения того же разбора, что и
+/// в [`parse`], иначе настройка, закомментированная пользователем, сошла бы за
+/// присутствующую и он никогда бы её не увидел.
+fn keys_in(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| {
+            let line = line.split('#').next().unwrap_or("").trim();
+            line.split_once('=').map(|(key, _)| key.trim().to_string())
+        })
+        .collect()
+}
+
+/// Дописывает в пользовательский файл настройки, появившиеся в новой версии.
+///
+/// Конфиг принадлежит игроку и переживает обновление игры — в этом его смысл.
+/// Но новая версия приносит новые настройки, и если о них не сказать, человек
+/// просто не узнает, что они есть. Поэтому файл не перезаписывается, а
+/// дополняется в конец: чужие значения, комментарии и порядок остаются как были.
+fn append_new_settings(path: &Path, text: &str) {
+    let Some(addition) = missing_settings(&keys_in(text)) else { return };
+    let names: Vec<&str> = addition
+        .lines()
+        .filter_map(|line| line.split_once(" = ").map(|(key, _)| key))
+        .filter(|key| !key.starts_with('#'))
+        .collect();
+
+    let mut updated = text.to_string();
+    if !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str(
+        "\n# --- Добавлено при обновлении игры ---\n         # Ниже настройки, которых не было в твоей версии. Значения по умолчанию;\n         # правь как любые другие. Твои прежние значения не тронуты.\n",
+    );
+    updated.push_str(&addition);
+
+    match std::fs::write(path, updated) {
+        Ok(()) => info!(
+            "в конфиг дописаны новые настройки ({}): {}",
+            names.len(),
+            names.join(", ")
+        ),
+        // Не беда: сервер и так запустится на значениях по умолчанию. Права
+        // на файл могут быть чужими, каталог — только для чтения.
+        Err(error) => warn!(
+            "не смог дописать новые настройки в {}: {error}. \
+             Сервер работает, но в файле их не будет: {}",
+            path.display(),
+            names.join(", ")
+        ),
+    }
+}
+
 /// Keeps a hand-edited file from producing an unplayable world.
 fn sanitize(config: &mut ServerConfig) {
     config.max_organisms = config.max_organisms.max(1);
@@ -226,6 +310,9 @@ pub fn load() -> ServerConfig {
     for path in candidate_paths() {
         if let Ok(text) = std::fs::read_to_string(&path) {
             parse(&text, &mut config);
+            // Файл старой версии не знает о новых настройках — допишем их,
+            // не трогая того, что игрок уже настроил.
+            append_new_settings(&path, &text);
             loaded_from = Some(path);
             break;
         }
@@ -350,6 +437,61 @@ mod tests {
         assert_eq!(parsed.toxin_radius, 4.5);
         assert_eq!(parsed.points_per_kill, 9);
         assert_eq!(parsed.season_length, original.season_length);
+    }
+
+    /// Главное свойство дописывания: чужой файл остаётся чужим файлом.
+    #[test]
+    fn appending_keeps_everything_the_player_wrote() {
+        let original = "# мои настройки, не трогать\n\
+                        max_organisms = 120   # специально много\n\
+                        \n\
+                        port=6000\n";
+        let addition = missing_settings(&keys_in(original)).expect("новые настройки есть");
+
+        // Заданное игроком в дописку не попадает.
+        assert!(!addition.contains("\nmax_organisms = "), "перезаписали заданную настройку");
+        assert!(!addition.contains("\nport = "), "перезаписали заданную настройку");
+        // А то, чего у него не было, — попадает.
+        assert!(addition.contains("\nbase_attack = "));
+        assert!(addition.contains("\nseason_length = "));
+
+        // Склеенный файл читается и сохраняет всё, что игрок настроил.
+        let combined = format!("{original}{addition}");
+        let mut config = ServerConfig::default();
+        parse(&combined, &mut config);
+        assert_eq!(config.max_organisms, 120, "потеряно значение игрока");
+        assert_eq!(config.port, 6000, "потеряно значение игрока");
+        assert_eq!(config.base_attack, BASE_ATTACK, "новая настройка не по умолчанию");
+    }
+
+    /// Полный файл дописывать нечем — второй запуск не должен его раздувать.
+    #[test]
+    fn appending_is_idempotent() {
+        let full = ServerConfig::default().to_file_text();
+        assert!(missing_settings(&keys_in(&full)).is_none(), "дописал в полный файл");
+    }
+
+    /// Закомментированная настройка — это её отсутствие, а не присутствие.
+    /// Иначе игрок, спрятавший строку под `#`, о новой версии ключа не узнает.
+    #[test]
+    fn commented_out_settings_count_as_missing() {
+        let text = "# base_attack = 99\nport = 5555\n";
+        let keys = keys_in(text);
+        assert!(keys.iter().any(|k| k == "port"));
+        assert!(!keys.iter().any(|k| k == "base_attack"));
+        let addition = missing_settings(&keys).expect("есть что дописать");
+        assert!(addition.contains("\nbase_attack = "));
+    }
+
+    /// Заголовок раздела без настроек под ним — мусор в файле игрока.
+    #[test]
+    fn empty_sections_are_not_written() {
+        // Файл, где не хватает ровно одной настройки из раздела «сеть».
+        let mut text = ServerConfig::default().to_file_text();
+        text = text.replace("port = 5555", "# port убран");
+        let addition = missing_settings(&keys_in(&text)).expect("port отсутствует");
+        assert!(addition.contains("--- сеть ---"));
+        assert!(!addition.contains("--- бой ---"), "заголовок раздела без содержимого");
     }
 
     /// The generated file has to document every setting it contains.

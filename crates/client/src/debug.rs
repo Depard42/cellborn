@@ -191,7 +191,7 @@ fn update_overlay(
         .unwrap_or_else(|_| "нет".to_string());
 
     let mut lines = format!(
-        "F1 — отладка\n\
+        "F1 — отладка   {}\n\
          \n\
          КЛИЕНТ\n\
          кадров/с      {:.0}   ({:.1} мс, пик {:.1})\n\
@@ -200,6 +200,7 @@ fn update_overlay(
          облаков       {clouds_seen}\n\
          пинг          {ping}\n\
          сезон         {}   яд {:.2}\n",
+        version::full(),
         clock.fps,
         clock.frame_ms,
         clock.peak_ms,
