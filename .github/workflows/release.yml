@@ -33,14 +33,50 @@ env:
   # Отладочная информация в релизном бинарнике весит больше самого кода, а
   # игроку не нужна.
   CARGO_PROFILE_RELEASE_DEBUG: none
+  # Инкрементальная сборка на одноразовой машине только вредит: собирается всё
+  # равно с нуля, а гигабайты промежуточных файлов раздувают кеш.
+  CARGO_INCREMENTAL: 0
 
 jobs:
   # ─────────────────────────────────────────────
-  # Проверки. Идут всегда и первыми: нет смысла собирать дистрибутив из кода,
-  # который не проходит собственные тесты.
+  # Проверки. Идут всегда: нет смысла собирать дистрибутив из кода, который не
+  # проходит собственные тесты.
   # ─────────────────────────────────────────────
-  check:
-    name: Тесты и clippy
+  # Тесты и clippy — два задания, а не два шага одного.
+  #
+  # Шагами они шли друг за другом, и второй ждал двадцать минут, пока первый
+  # соберёт Bevy. Заданиями они идут параллельно: общее время становится
+  # максимумом из двух вместо суммы, и падение clippy больше не прячется за
+  # успешными тестами.
+  test:
+    name: Тесты
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Кеш внешних библиотек. Собственный ключ на задание: артефакты
+          # rustc и clippy — разные файлы, и в одном кеше они только вытесняли
+          # бы друг друга.
+          shared-key: test
+          # Сохранять кеш и при падении. Без этого один упавший прогон
+          # означает, что следующий снова собирает весь Bevy с нуля — ровно
+          # это и случилось на первой сборке.
+          cache-on-failure: true
+      - name: Системные библиотеки
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev
+      # --locked: Cargo.lock лежит в репозитории, и сборка обязана идти ровно
+      # по нему. Заодно ловит расхождение лока с Cargo.toml.
+      - name: Тесты
+        run: cargo test --workspace --locked
+
+  clippy:
+    name: Clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -48,16 +84,17 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: clippy
+          cache-on-failure: true
       - name: Системные библиотеки
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev \
             libx11-dev libxcursor-dev libxrandr-dev libxi-dev
-      - name: Тесты
-        run: cargo test --workspace --all-targets
       - name: Clippy
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets --locked
 
   # ─────────────────────────────────────────────
   # Дистрибутивы. Только для тега или ручного запуска: гонять получасовую
@@ -65,7 +102,7 @@ jobs:
   # ─────────────────────────────────────────────
   build:
     name: Сборка ${{ matrix.name }}
-    needs: check
+    needs: [test, clippy]
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     strategy:
       # Одна упавшая платформа не должна отменять вторую: полезнее увидеть,
@@ -84,6 +121,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Релизные артефакты не пересекаются с отладочными, поэтому кеш свой
+          # и на каждую платформу отдельный.
+          shared-key: release-${{ matrix.os }}
+          cache-on-failure: true
 
       - name: Системные библиотеки
         if: runner.os == 'Linux'
@@ -109,7 +151,7 @@ jobs:
           fi
 
       - name: Сборка
-        run: cargo build --release --workspace
+        run: cargo build --release --workspace --locked
 
       - name: Комплект (Linux)
         if: runner.os == 'Linux'

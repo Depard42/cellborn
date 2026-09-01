@@ -230,7 +230,7 @@ pub fn setup_world(
         commands.spawn((
             Transform::from_xyz(x, SEABED_Y + terrain_height(x, z) - size * 0.35, z)
                 .with_scale(Vec3::new(size, size * rng.random_range(0.4..0.8), size))
-                .with_rotation(Quat::from_rotation_y(rng.random_range(0.0..6.28))),
+                .with_rotation(Quat::from_rotation_y(rng.random_range(0.0..std::f32::consts::TAU))),
             Mesh3d(rock_mesh.clone()),
             MeshMaterial3d(rock_material.clone()),
         ));
@@ -254,10 +254,10 @@ pub fn setup_world(
             let z = cz + rng.random_range(-1.2..1.2);
             let height = rng.random_range(1.6..4.2);
             commands.spawn((
-                Kelp { phase: rng.random_range(0.0..6.28), bend: rng.random_range(0.06..0.2) },
+                Kelp { phase: rng.random_range(0.0..std::f32::consts::TAU), bend: rng.random_range(0.06..0.2) },
                 Transform::from_xyz(x, SEABED_Y + terrain_height(x, z) + height * 0.5, z)
                     .with_scale(Vec3::new(1.0, height, 1.0))
-                    .with_rotation(Quat::from_rotation_y(rng.random_range(0.0..6.28))),
+                    .with_rotation(Quat::from_rotation_y(rng.random_range(0.0..std::f32::consts::TAU))),
                 Mesh3d(blade_mesh.clone()),
                 MeshMaterial3d(kelp_material.clone()),
                 NotShadowCaster,
@@ -415,7 +415,7 @@ pub fn spawn_food_visuals(
             FoodKind::Detritus => 2,
         };
         commands.entity(entity).insert((
-            FoodVisual { phase: rng.random_range(0.0..6.28) },
+            FoodVisual { phase: rng.random_range(0.0..std::f32::consts::TAU) },
             Transform::from_translation(position.0)
                 .with_scale(Vec3::splat(nutrient.kind.radius())),
             Visibility::default(),
@@ -519,7 +519,7 @@ pub fn spawn_cloud_visuals(
                         ),
                         spin: rng.random_range(-0.5..0.5),
                         scale: rng.random_range(0.18..0.46),
-                        phase: rng.random_range(0.0..6.28),
+                        phase: rng.random_range(0.0..std::f32::consts::TAU),
                     },
                     Transform::default(),
                     Mesh3d(assets.mesh.clone()),
