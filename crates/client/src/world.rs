@@ -15,7 +15,7 @@ use crate::fx::NotShadowCaster;
 pub const SEABED_Y: f32 = -2.6;
 const ARENA: f32 = ARENA_HALF_EXTENT;
 const SNOW_COUNT: usize = 900;
-const SNOW_BOX: Vec3 = Vec3::new(52.0, 16.0, 52.0);
+const SNOW_BOX: Vec3 = Vec3::new(58.0, 16.0, 58.0);
 
 #[derive(Resource)]
 pub struct ToxinAssets {
@@ -48,7 +48,17 @@ pub struct FoodVisual {
 
 /// Marks toxin clouds that already have a body.
 #[derive(Component)]
-pub struct CloudVisual {
+pub struct CloudVisual;
+
+/// One puff of the haze: a cloud is a dozen of these, drifting and turning
+/// inside its radius. A single translucent sphere read as a bubble, not as
+/// poisoned water.
+#[derive(Component)]
+pub struct CloudPuff {
+    pub offset: Vec3,
+    pub drift: Vec3,
+    pub spin: f32,
+    pub scale: f32,
     pub phase: f32,
 }
 
@@ -195,7 +205,7 @@ pub fn setup_world(
     // Seabed.
     commands.spawn((
         Transform::from_xyz(0.0, SEABED_Y, 0.0),
-        Mesh3d(meshes.add(seabed_mesh(80.0, 110))),
+        Mesh3d(meshes.add(seabed_mesh(150.0, 150))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.10, 0.13, 0.12),
             perceptual_roughness: 0.96,
@@ -213,7 +223,7 @@ pub fn setup_world(
         perceptual_roughness: 0.9,
         ..default()
     });
-    for _ in 0..70 {
+    for _ in 0..190 {
         let x = rng.random_range(-ARENA - 8.0..ARENA + 8.0);
         let z = rng.random_range(-ARENA - 8.0..ARENA + 8.0);
         let size = rng.random_range(0.4..2.2);
@@ -236,7 +246,7 @@ pub fn setup_world(
         cull_mode: None,
         ..default()
     });
-    for _ in 0..46 {
+    for _ in 0..120 {
         let cx = rng.random_range(-ARENA..ARENA);
         let cz = rng.random_range(-ARENA..ARENA);
         for _ in 0..rng.random_range(3..7) {
@@ -316,8 +326,8 @@ pub fn setup_world(
     commands.insert_resource(ToxinAssets {
         mesh: meshes.add(Sphere::new(1.0).mesh().uv(20, 12)),
         material: materials.add(StandardMaterial {
-            base_color: Color::srgba(0.62, 0.25, 0.78, 0.07),
-            emissive: LinearRgba::new(0.10, 0.02, 0.14, 1.0),
+            base_color: Color::srgba(0.60, 0.28, 0.74, 0.10),
+            emissive: LinearRgba::new(0.035, 0.008, 0.05, 1.0),
             alpha_mode: AlphaMode::Blend,
             double_sided: true,
             cull_mode: None,
@@ -355,8 +365,8 @@ fn food_material(color: Color, glow: f32) -> StandardMaterial {
 /// runs out of particles however far you swim.
 pub fn drift_snow(
     time: Res<Time>,
-    camera: Query<&Transform, (With<Camera3d>, Without<Snow>)>,
-    mut snow: Query<(&Snow, &mut Transform), Without<Camera3d>>,
+    camera: Query<&Transform, (With<crate::MainCamera>, Without<Snow>)>,
+    mut snow: Query<(&Snow, &mut Transform), Without<crate::MainCamera>>,
 ) {
     let dt = time.delta_secs();
     let t = time.elapsed_secs();
@@ -474,7 +484,8 @@ fn mix(a: Color, b: Color, k: f32) -> Color {
     })
 }
 
-/// Gives every replicated toxin cloud a visible haze.
+/// Gives every replicated toxin cloud a visible haze: a scatter of soft puffs
+/// rather than one sphere.
 pub fn spawn_cloud_visuals(
     mut commands: Commands,
     assets: Res<ToxinAssets>,
@@ -483,25 +494,77 @@ pub fn spawn_cloud_visuals(
     let mut rng = rand::rng();
     for (entity, cloud) in &clouds {
         commands.entity(entity).insert((
-            CloudVisual { phase: rng.random_range(0.0..6.28) },
-            Transform::from_translation(cloud.position).with_scale(Vec3::splat(cloud.radius)),
+            CloudVisual,
+            Transform::from_translation(cloud.position),
             Visibility::default(),
-            Mesh3d(assets.mesh.clone()),
-            MeshMaterial3d(assets.material.clone()),
-            NotShadowCaster,
         ));
+
+        for _ in 0..26 {
+            // Puffs sit anywhere inside the sphere, biased toward the middle so
+            // the haze has a dense core and ragged edges.
+            let direction = Vec3::new(
+                rng.random_range(-1.0..1.0),
+                rng.random_range(-0.55..0.55),
+                rng.random_range(-1.0..1.0),
+            )
+            .normalize_or(Vec3::X);
+            let radius = rng.random_range(0.0f32..1.0).powf(0.6);
+            let puff = commands
+                .spawn((
+                    CloudPuff {
+                        offset: direction * radius,
+                        drift: Vec3::new(
+                            rng.random_range(-0.05..0.05),
+                            rng.random_range(0.01..0.06),
+                            rng.random_range(-0.05..0.05),
+                        ),
+                        spin: rng.random_range(-0.5..0.5),
+                        scale: rng.random_range(0.18..0.46),
+                        phase: rng.random_range(0.0..6.28),
+                    },
+                    Transform::default(),
+                    Mesh3d(assets.mesh.clone()),
+                    MeshMaterial3d(assets.material.clone()),
+                    NotShadowCaster,
+                ))
+                .id();
+            commands.entity(entity).add_child(puff);
+        }
     }
 }
 
-/// Clouds breathe and spread as they disperse.
+/// The haze roils: puffs drift, turn and breathe, and the whole thing thins out
+/// as the cloud disperses.
 pub fn animate_clouds(
     time: Res<Time>,
-    mut clouds: Query<(&CloudVisual, &ToxinCloud, &mut Transform)>,
+    clouds: Query<(&ToxinCloud, &Children)>,
+    mut cloud_transforms: Query<&mut Transform, (With<CloudVisual>, Without<CloudPuff>)>,
+    mut puffs: Query<(&mut CloudPuff, &mut Transform), Without<CloudVisual>>,
 ) {
     let t = time.elapsed_secs();
-    for (visual, cloud, mut transform) in &mut clouds {
-        let pulse = 1.0 + (t * 0.8 + visual.phase).sin() * 0.06;
-        transform.translation = cloud.position;
-        transform.scale = Vec3::splat(cloud.radius * pulse);
+    let dt = time.delta_secs();
+    for (cloud, children) in &clouds {
+        for child in children.iter() {
+            if let Ok(mut transform) = cloud_transforms.get_mut(child) {
+                transform.translation = cloud.position;
+            }
+            let Ok((mut puff, mut transform)) = puffs.get_mut(child) else { continue };
+            // Slow internal convection, plus a rise: poison drifts upward.
+            let (drift, scale, phase, spin) = (puff.drift, puff.scale, puff.phase, puff.spin);
+            puff.offset += drift * dt;
+            if puff.offset.length() > 1.15 {
+                puff.offset = -puff.offset * 0.8;
+            }
+            let breathe = 1.0 + (t * 0.7 + phase).sin() * 0.18;
+            transform.translation = cloud.position + puff.offset * cloud.radius;
+            // Клубы не шары: слегка сплюснуты и вытянуты по-разному, иначе
+            // облако читается как гроздь пузырей.
+            transform.scale = Vec3::new(
+                cloud.radius * scale * breathe * 1.25,
+                cloud.radius * scale * breathe * 0.7,
+                cloud.radius * scale * breathe * 1.1,
+            );
+            transform.rotate_y(spin * dt);
+        }
     }
 }

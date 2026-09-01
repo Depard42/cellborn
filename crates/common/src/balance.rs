@@ -34,9 +34,14 @@ pub const ENERGY_PER_MUTATION_POINT: f32 = 40.0;
 pub const POINTS_PER_SEASON: u16 = 2;
 
 /// Nutrients alive in the arena at once, at `food_density == 1.0`.
-pub const FOOD_TARGET: usize = 260;
+///
+/// The arena is 140×140 now — four times the old area. 620 particles kept the
+/// water from looking empty but quietly made points four times slower to earn,
+/// because what matters for feeding is density, not the total count. 900 brings
+/// the density back to roughly what it was on the small map.
+pub const FOOD_TARGET: usize = 900;
 /// Nutrients spawned per second while below the target.
-pub const FOOD_SPAWN_RATE: f32 = 14.0;
+pub const FOOD_SPAWN_RATE: f32 = 45.0;
 /// Nutrients a corpse leaves behind.
 pub const CORPSE_NUTRIENTS: usize = 6;
 
@@ -54,10 +59,9 @@ pub const MUTATION_COOLDOWN: f32 = 0.25;
 /// this is also the hard ceiling the client draws against.
 pub const MAX_PARTS: usize = 100;
 
-/// Default cap for wild bots, which mutate for free and would otherwise grow to
-/// the full limit unattended — a hundred organs each, times nine bots, is a lot
-/// of meshes for nothing.
-pub const WILD_MAX_PARTS: usize = 24;
+/// Default cap for bots. They pay for growth exactly like a player now, so the
+/// same ceiling applies; lower it in the config if a server needs the headroom.
+pub const WILD_MAX_PARTS: usize = MAX_PARTS;
 /// Hard cap on copies of a single part kind.
 pub const MAX_PARTS_PER_KIND: usize = 6;
 
@@ -97,10 +101,10 @@ pub const MAX_ORGANISMS: usize = 70;
 
 /// Wild organisms the server keeps alive in the arena.
 pub const WILD_TARGET: usize = 9;
-/// Seconds between random mutations in a wild organism.
-pub const WILD_MUTATION_INTERVAL: f32 = 12.0;
+/// Seconds between a bot's attempts to spend the points it has earned.
+pub const WILD_MUTATION_INTERVAL: f32 = 6.0;
 /// How far a bot looks for food or prey.
-pub const BOT_VISION: f32 = 16.0;
+pub const BOT_VISION: f32 = 20.0;
 
 // --- toxin clouds -----------------------------------------------------------
 

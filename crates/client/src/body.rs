@@ -25,6 +25,9 @@ pub struct Body {
     pub divisions: u32,
     pub eat_timer: f32,
     pub hurt_timer: f32,
+    /// Направление и глубина вмятины от соседа, в локальных осях тела.
+    pub dent: Vec3,
+    pub dent_depth: f32,
     pub split_timer: f32,
     pub radius: f32,
     /// Kept so the membrane can be recoloured when kinship changes.
@@ -146,13 +149,22 @@ pub fn build_bodies(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     organisms: Query<
-        (Entity, &PlayerGenome, &PlayerVitals, &PlayerPosition, Has<Controlled>, Option<&Body>),
+        (
+            Entity,
+            &PlayerGenome,
+            &PlayerVitals,
+            &PlayerPosition,
+            Has<Controlled>,
+            // Только у игроков есть сетевой идентификатор: у ботов его нет.
+            Has<PlayerId>,
+            Option<&Body>,
+        ),
         Or<(Without<Body>, Changed<PlayerGenome>)>,
     >,
     mine: Query<&PlayerGenome, With<Controlled>>,
     children: Query<&Children>,
 ) {
-    for (entity, genome, vitals, position, controlled, body) in &organisms {
+    for (entity, genome, vitals, position, controlled, is_player, body) in &organisms {
         let signature = genome_signature(&genome.0);
         if body.is_some_and(|b| b.signature == signature) {
             continue;
@@ -192,6 +204,8 @@ pub fn build_bodies(
                 divisions: 0,
                 eat_timer: 0.0,
                 hurt_timer: 0.0,
+                dent: Vec3::X,
+                dent_depth: 0.0,
                 split_timer: 0.0,
                 radius,
                 material: membrane_material.clone(),
@@ -225,6 +239,47 @@ pub fn build_bodies(
             ))
             .id();
         commands.entity(membrane).add_child(nucleus);
+
+        // Клетками игроков управляет не программа, и это должно быть видно:
+        // внутри у них сидит паразит — вытянутое ядро с двумя усиками,
+        // которого нет ни у одного бота.
+        if is_player {
+            let parasite = commands
+                .spawn((
+                    Parasite { phase: (entity.to_bits() % 60) as f32 * 0.11 },
+                    Transform::from_xyz(0.18, 0.0, -0.12).with_scale(Vec3::new(0.22, 0.14, 0.42)),
+                    Mesh3d(meshes.add(Sphere::new(1.0).mesh().uv(14, 9))),
+                    MeshMaterial3d(materials.add(StandardMaterial {
+                        base_color: Color::srgb(0.98, 0.28, 0.58),
+                        // Паразит должен читаться сквозь мутную мембрану, поэтому
+                        // светится заметно ярче остальных органелл.
+                        emissive: LinearRgba::new(1.6, 0.15, 0.6, 1.0),
+                        perceptual_roughness: 0.2,
+                        ..default()
+                    })),
+                    NotShadowCaster,
+                ))
+                .id();
+            let tail_mesh = meshes.add(Capsule3d::new(0.09, 0.9).mesh().latitudes(4).longitudes(6));
+            let tail_material = materials.add(StandardMaterial {
+                base_color: Color::srgb(0.99, 0.60, 0.78),
+                emissive: LinearRgba::new(1.1, 0.25, 0.5, 1.0),
+                ..default()
+            });
+            for side in [-1.0f32, 1.0] {
+                let whisker = commands
+                    .spawn((
+                        Transform::from_xyz(side * 0.5, 0.0, 0.9)
+                            .with_rotation(Quat::from_rotation_x(1.2) * Quat::from_rotation_z(side * 0.4)),
+                        Mesh3d(tail_mesh.clone()),
+                        MeshMaterial3d(tail_material.clone()),
+                        NotShadowCaster,
+                    ))
+                    .id();
+                commands.entity(parasite).add_child(whisker);
+            }
+            commands.entity(membrane).add_child(parasite);
+        }
 
         // Cytoplasm: vacuoles and granules drifting inside the cell, plus the
         // faint haze that keeps the interior from looking empty.
@@ -448,6 +503,66 @@ fn spawn_part(
     }
 }
 
+/// Паразит: органелла, которая есть только у клеток под управлением игроков.
+///
+/// Игроков в море единицы, и отличить их от ботов иначе никак: снаружи те же
+/// органы, тот же цвет по родству. Паразит — единственная деталь, которой у
+/// ботов не бывает, поэтому по нему видно, что перед тобой не программа.
+#[derive(Component)]
+pub struct Parasite {
+    pub phase: f32,
+}
+
+/// Squashes bodies where they press against each other.
+///
+/// Cells are soft: bumping into someone should visibly dent you, not stop you
+/// like a wall. The dent is presentation only — positions are already separated
+/// by the simulation, this just makes the contact readable.
+pub fn deform_on_contact(
+    time: Res<Time>,
+    positions: Query<(Entity, &PlayerPosition, &PlayerVitals)>,
+    mut bodies: Query<(Entity, &mut Body, &PlayerPosition, &PlayerVitals, &Transform)>,
+) {
+    let dt = time.delta_secs();
+    let neighbours: Vec<(Entity, Vec3, f32)> = positions
+        .iter()
+        .map(|(e, p, v)| (e, p.0, body_radius(v.mass)))
+        .collect();
+
+    for (entity, mut body, position, vitals, transform) in &mut bodies {
+        let radius = body_radius(vitals.mass);
+        let mut deepest = 0.0;
+        let mut direction = Vec3::X;
+
+        for (other, other_position, other_radius) in &neighbours {
+            if *other == entity {
+                continue;
+            }
+            let contact = radius + other_radius;
+            let offset = *other_position - position.0;
+            let distance = offset.length();
+            if distance >= contact || distance < 1e-4 {
+                continue;
+            }
+            let depth = (contact - distance) / contact;
+            if depth > deepest {
+                deepest = depth;
+                // The dent is stored in the body's own axes, so it stays on the
+                // side that is actually being pressed while the cell turns.
+                direction = transform.rotation.inverse() * (offset / distance);
+            }
+        }
+
+        // Клетки мягкие: вмятина набирается быстро и распускается медленнее,
+        // как настоящая мембрана.
+        let speed = if deepest > body.dent_depth { 14.0 } else { 5.0 };
+        body.dent_depth = body.dent_depth.lerp(deepest.min(0.9), (dt * speed).min(1.0));
+        if deepest > 0.0 {
+            body.dent = direction;
+        }
+    }
+}
+
 /// Keeps the membrane colour honest about kinship: family, stranger, or enemy.
 pub fn recolor_bodies(
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -494,6 +609,17 @@ pub fn animate_bodies(
             Without<Membrane>,
             Without<TailSegment>,
             Without<CiliaHair>,
+        ),
+    >,
+    mut parasites: Query<
+        (&Parasite, &mut Transform),
+        (
+            Without<Body>,
+            Without<Membrane>,
+            Without<TailSegment>,
+            Without<CiliaHair>,
+            Without<MouthVisual>,
+            Without<Organelle>,
         ),
     >,
     mut organelles: Query<
@@ -572,25 +698,47 @@ pub fn animate_bodies(
         body.radius = radius;
         let starving = (vitals.energy / vitals.energy_cap.max(1.0)).clamp(0.0, 1.0);
         // Breathing is slow when calm, shallow and fast when starving.
-        let breathe = (body.phase * 1.1).sin() * (0.05 + 0.03 * starving);
+        let breathe = (body.phase * 1.1).sin() * (0.08 + 0.05 * starving);
         // Squash and stretch along the direction of travel.
-        let stretch = 1.0 + (body.speed * 0.045).min(0.35) + body.eat_timer * 0.25;
+        let stretch = 1.0 + (body.speed * 0.075).min(0.55) + body.eat_timer * 0.35;
         let squeeze = 1.0 / stretch.sqrt();
+        // A neighbour pressing on us flattens that side and bulges the others.
+        let dent = body.dent_depth;
+        let squeeze_axis = body.dent.abs().normalize_or(Vec3::X);
+        // Вдавленная ось сплющивается сильно, остальные заметно раздуваются:
+        // объём как будто перетекает в стороны.
+        let dent_scale =
+            Vec3::ONE - squeeze_axis * dent * 1.05 + Vec3::splat(dent * 0.42);
+
         // While splitting the cell pinches in the middle and swells along its axis.
         let split = body.split_timer;
         let scale = Vec3::new(
             radius * squeeze * (1.0 + breathe) * (1.0 - split * 0.25),
             radius * squeeze * (1.0 - breathe * 0.6) * (1.0 - split * 0.25),
             radius * stretch * (1.0 + split * 0.35),
-        ) * if alive { 1.0 } else { 0.9 };
+        ) * dent_scale
+            * if alive { 1.0 } else { 0.9 };
 
         let Ok(body_children) = children.get(entity) else { continue; };
         for child in body_children.iter() {
             if let Ok(mut membrane) = membranes.get_mut(child) {
-                membrane.scale = membrane.scale.lerp(scale, (dt * 10.0).min(1.0));
+                // Мембрана догоняет цель с запаздыванием — отсюда ощущение желе.
+                membrane.scale = membrane.scale.lerp(scale, (dt * 13.0).min(1.0));
             }
             let Ok(parts) = children.get(child) else { continue; };
             for part_root in parts.iter() {
+                if let Ok((parasite, mut inner)) = parasites.get_mut(part_root) {
+                    // Паразит медленно ползает внутри и извивается.
+                    let t = body.phase * 0.5 + parasite.phase;
+                    inner.translation = Vec3::new(
+                        0.18 + t.sin() * 0.22,
+                        (t * 0.7).cos() * 0.16,
+                        -0.12 + (t * 1.3).sin() * 0.20,
+                    );
+                    inner.rotation = Quat::from_rotation_y(t * 0.6)
+                        * Quat::from_rotation_x((t * 1.7).sin() * 0.35);
+                    continue;
+                }
                 if let Ok((organelle, mut inner)) = organelles.get_mut(part_root) {
                     let t = body.phase * organelle.speed;
                     inner.translation = organelle.orbit
@@ -639,7 +787,7 @@ pub fn animate_bodies(
 /// Keeps health bars facing the camera and sized to the health they show.
 pub fn update_health_bars(
     mut materials: ResMut<Assets<StandardMaterial>>,
-    camera: Query<&GlobalTransform, With<Camera3d>>,
+    camera: Query<&GlobalTransform, With<crate::MainCamera>>,
     organisms: Query<(&PlayerVitals, &Body, &Children)>,
     mut bars: Query<(&mut Transform, &Children), With<HealthBar>>,
     mut fills: Query<(&mut Transform, &MeshMaterial3d<StandardMaterial>), (With<HealthFill>, Without<HealthBar>)>,

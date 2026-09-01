@@ -1,6 +1,9 @@
+mod atlas;
 mod body;
 mod fx;
+mod menu;
 mod ui;
+mod wiki;
 mod world;
 
 use bevy::post_process::bloom::Bloom;
@@ -12,10 +15,19 @@ use lightyear::prelude::input::native::*;
 use lightyear::prelude::*;
 use std::net::SocketAddr;
 
+use menu::Screen;
 use world::{palette, SEABED_Y};
 
 /// Camera position relative to the organism it follows.
 const CAMERA_OFFSET: Vec3 = Vec3::new(0.0, 11.0, 12.0);
+
+/// Камера, которая рисует мир в окно.
+///
+/// С появлением камеры превью в атласе органов их стало две, и `With<Camera3d>`
+/// перестал быть однозначным: `single()` возвращал ошибку, камера не следовала
+/// за организмом, и игрок смотрел на мир из точки старта.
+#[derive(Component)]
+pub struct MainCamera;
 
 /// Address of the server, overridable with the first CLI argument.
 #[derive(Resource)]
@@ -37,13 +49,33 @@ fn main() {
 
     app.insert_resource(ServerAddress(server_addr));
     app.init_resource::<ui::MutationSelection>();
-    app.add_systems(Startup, ui::load_font);
-    app.add_systems(Startup, (setup_camera, world::setup_world, ui::setup_hud).after(ui::load_font));
+    app.init_resource::<menu::WikiSelection>();
+    app.init_resource::<atlas::AtlasSelection>();
+    app.init_state::<Screen>();
+
+    // Меню и справочник: до нажатия «Играть» клиент не трогает сеть.
+    app.add_systems(OnEnter(Screen::Menu), menu::setup_menu);
+    app.add_systems(OnExit(Screen::Menu), menu::despawn::<menu::MenuRoot>);
+    app.add_systems(OnEnter(Screen::Wiki), menu::setup_wiki);
+    app.add_systems(OnExit(Screen::Wiki), menu::despawn::<menu::WikiRoot>);
+    app.add_systems(Update, menu::menu_input.run_if(in_state(Screen::Menu)));
+    app.add_systems(
+        Update,
+        (menu::wiki_input, menu::update_wiki, menu::update_atlas, atlas::rebuild_preview)
+            .run_if(in_state(Screen::Wiki)),
+    );
+    app.add_systems(Update, menu::game_escape.run_if(in_state(Screen::Game)));
+    app.add_systems(Update, atlas::spin_preview);
+    ui::install_font(&mut app);
+    app.add_systems(Startup, (setup_camera, world::setup_world, atlas::setup_preview));
+    app.add_systems(OnEnter(Screen::Game), (ui::setup_hud, connect_client));
+    app.add_systems(OnExit(Screen::Game), menu::despawn::<ui::GameUi>);
     app.add_systems(
         Update,
         (
             body::build_bodies,
             body::recolor_bodies,
+            body::deform_on_contact,
             body::animate_bodies,
             body::update_health_bars,
             follow_camera,
@@ -67,7 +99,8 @@ fn main() {
             ui::update_mutation_panel,
             ui::mutation_navigation,
             ui::mutation_input,
-        ),
+        )
+            .run_if(in_state(Screen::Game)),
     );
     app.run();
 }
@@ -77,7 +110,7 @@ impl Plugin for ClientGamePlugin {
     fn build(&self, app: &mut App) {
         // Enables prediction/rollback for the entities we control.
         app.insert_resource(PredictionManager::default());
-        app.add_systems(Startup, (connect_client, load_fx));
+        app.add_systems(Startup, load_fx);
         app.add_systems(
             FixedPreUpdate,
             buffer_input.in_set(lightyear::prelude::client::input::InputSystems::WriteClientInputs),
@@ -139,18 +172,36 @@ fn buffer_input(
 
 fn predicted_movement(
     time: Res<Time>,
+    others: Query<(&PlayerPosition, &PlayerVitals), Without<Predicted>>,
     mut query: Query<
         (&mut PlayerPosition, &PlayerGenome, &PlayerProgress, &ActionState<Inputs>),
         With<Predicted>,
     >,
 ) {
     let dt = time.delta_secs();
+    // Neighbours as we currently see them: the prediction has to bump into the
+    // same bodies the server will, or swimming into someone looks like passing
+    // through them and then being yanked back.
+    let neighbours: Vec<(Vec3, f32)> =
+        others.iter().map(|(p, v)| (p.0, body_radius(v.mass))).collect();
+
     for (mut pos, genome, progress, input) in &mut query {
         if progress.dead {
             continue;
         }
         let organism = OrganismState::from_genome(genome.0.clone());
         step_movement(&mut pos.0, &input.0.direction(), movement_speed(&organism), dt);
+
+        // Only our own body is corrected here; the server moves both sides and
+        // the difference is reconciled by the usual rollback.
+        let radius = body_radius(organism.mass);
+        for (other, other_radius) in &neighbours {
+            if let Some(push) = overlap_push(pos.0, radius, *other, *other_radius) {
+                pos.0 += push;
+            }
+        }
+        pos.0.x = pos.0.x.clamp(-ARENA_HALF_EXTENT, ARENA_HALF_EXTENT);
+        pos.0.z = pos.0.z.clamp(-ARENA_HALF_EXTENT, ARENA_HALF_EXTENT);
     }
 }
 
@@ -161,7 +212,11 @@ fn mark_controlled(trigger: On<Add, Controlled>, mut commands: Commands) {
 fn setup_camera(mut commands: Commands) {
     let p = palette(Season::Bloom);
     commands.spawn((
+        MainCamera,
         Camera3d::default(),
+        // С появлением камеры превью их стало две, и интерфейсу нужно сказать,
+        // какая из них его: иначе он уходит в текстуру, а окно чернеет.
+        IsDefaultUiCamera,
         bevy::camera::Hdr,
         Transform::from_translation(CAMERA_OFFSET).looking_at(Vec3::ZERO, Vec3::Y),
         // Underwater depth: everything fades into the water colour with distance.
@@ -180,7 +235,7 @@ fn setup_camera(mut commands: Commands) {
 fn follow_camera(
     time: Res<Time>,
     player: Query<(&PlayerPosition, &PlayerVitals), With<Controlled>>,
-    mut camera: Query<&mut Transform, With<Camera3d>>,
+    mut camera: Query<&mut Transform, With<MainCamera>>,
 ) {
     let Ok((player, vitals)) = player.single() else { return; };
     let Ok(mut transform) = camera.single_mut() else { return; };

@@ -47,11 +47,25 @@ pub struct BotState {
     pub wander: Vec3,
     pub retarget: f32,
     pub mutate_in: f32,
+    /// Evasion state: a weaving phase, its direction, its speed, and the timer
+    /// until the next hard change of course.
+    pub panic_phase: f32,
+    pub panic_side: f32,
+    pub panic_rate: f32,
+    pub panic_break: f32,
 }
 
 impl Default for BotState {
     fn default() -> Self {
-        Self { wander: Vec3::ZERO, retarget: 0.0, mutate_in: WILD_MUTATION_INTERVAL }
+        Self {
+            wander: Vec3::ZERO,
+            retarget: 0.0,
+            mutate_in: WILD_MUTATION_INTERVAL,
+            panic_phase: 0.0,
+            panic_side: 1.0,
+            panic_rate: 4.0,
+            panic_break: 0.0,
+        }
     }
 }
 
@@ -97,6 +111,37 @@ pub fn random_position() -> Vec3 {
     let mut rng = rand::rng();
     let edge = ARENA_HALF_EXTENT * 0.85;
     Vec3::new(rng.random_range(-edge..edge), 0.0, rng.random_range(-edge..edge))
+}
+
+/// Keeps bodies out of each other.
+///
+/// Runs after movement, before combat: two cells may touch and hurt each other,
+/// but never occupy the same water. Heavier bodies give way less, so a big cell
+/// shoves a small one aside rather than being pushed by it.
+pub fn separate_bodies(mut organisms: Query<(Entity, &mut PlayerPosition, &OrganismState)>) {
+    let snapshot: Vec<(Entity, Vec3, f32, f32)> = organisms
+        .iter()
+        .map(|(e, p, s)| (e, p.0, body_radius(s.mass), s.mass))
+        .collect();
+
+    let mut moves: Vec<(Entity, Vec3)> = Vec::new();
+    for i in 0..snapshot.len() {
+        for j in (i + 1)..snapshot.len() {
+            let (a, b) = (&snapshot[i], &snapshot[j]);
+            let Some(push) = overlap_push(a.1, a.2, b.1, b.2) else { continue };
+            // Split the correction by mass: the lighter cell moves further.
+            let total = a.3 + b.3;
+            moves.push((a.0, push * (b.3 / total)));
+            moves.push((b.0, -push * (a.3 / total)));
+        }
+    }
+
+    for (entity, push) in moves {
+        let Ok((_, mut position, _)) = organisms.get_mut(entity) else { continue };
+        position.0 += push;
+        position.0.x = position.0.x.clamp(-ARENA_HALF_EXTENT, ARENA_HALF_EXTENT);
+        position.0.z = position.0.z.clamp(-ARENA_HALF_EXTENT, ARENA_HALF_EXTENT);
+    }
 }
 
 /// Contact damage between organisms that are far enough apart genetically.

@@ -34,30 +34,50 @@ pub fn maintain_wild(
     spawn_organism(&mut commands, state, random_position(), None, Some(Brain::Wild));
 }
 
-/// Wild organisms drift genetically on their own, without a mutation economy.
-pub fn wild_mutation(
+/// Bots grow on the same economy as the player: they earn points by eating,
+/// killing and surviving seasons, and pay the same rising price for each organ.
+///
+/// Earlier they mutated for free on a timer, which meant a bot that never ate
+/// still ended up covered in organs while a player had to work for every one.
+pub fn bot_mutation(
     config: Res<ServerConfig>,
     time: Res<Time>,
-    mut bots: Query<(&Brain, &mut OrganismState, &mut BotState)>,
+    mut bots: Query<(&mut OrganismState, &PlayerProgress, &mut BotState), With<Brain>>,
 ) {
     let dt = time.delta_secs();
     let mut rng = rand::rng();
-    for (brain, mut organism, mut bot) in &mut bots {
-        if *brain != Brain::Wild {
-            continue;
-        }
+    for (mut organism, progress, mut bot) in &mut bots {
         bot.mutate_in -= dt;
-        if bot.mutate_in > 0.0 {
+        if bot.mutate_in > 0.0 || progress.dead {
             continue;
         }
+        // Bots think about growing on their own rhythm; the decision itself is
+        // still paid for out of the same points a player would spend.
         bot.mutate_in = config.wild_mutation_interval * rng.random_range(0.6..1.6);
-        // Wild growth is free, so it stops well short of the player ceiling.
-        if organism.genome.parts.len() >= config.wild_max_parts.min(config.max_parts) {
+
+        let limit = config.wild_max_parts.min(config.max_parts);
+        if organism.genome.parts.len() >= limit {
             continue;
         }
-        let kind = random_part(rng.random::<u64>());
-        organism.genome.push_part(kind);
-        organism.recompute();
+
+        // A little instinct: a mouth first, otherwise it never learns to feed.
+        let wanted = if organism.genome.count_family(PartFamily::Mouth) < 2
+            && organism.mutation_error(PartKind::basic(PartFamily::Mouth)).is_none()
+        {
+            Some(PartKind::basic(PartFamily::Mouth))
+        } else {
+            // Everything it can currently afford, then one at random: bots
+            // explore the tree instead of following one optimal build.
+            let affordable: Vec<PartKind> = PartKind::all()
+                .filter(|kind| organism.mutation_error(*kind).is_none())
+                .collect();
+            (!affordable.is_empty())
+                .then(|| affordable[rng.random_range(0..affordable.len())])
+        };
+
+        if let Some(kind) = wanted {
+            organism.apply_mutation(kind);
+        }
     }
 }
 
@@ -156,13 +176,27 @@ pub fn bot_movement(
         }
 
         let direction = if escape != Vec3::ZERO {
-            // Running away also means not running into a wall.
+            // Panic is not a straight line. A cell that flees on a fixed bearing
+            // is trivially chased down, so the escape vector gets a sideways
+            // weave plus occasional hard breaks — enough to be hard to predict.
+            bot.panic_break -= dt;
+            if bot.panic_break <= 0.0 {
+                bot.panic_break = rng.random_range(0.35..1.1);
+                bot.panic_side = if rng.random::<bool>() { 1.0 } else { -1.0 };
+                bot.panic_rate = rng.random_range(2.5..6.5);
+            }
+            bot.panic_phase += dt * bot.panic_rate;
+
             let away = escape.normalize_or(bot.wander);
+            let sideways = Vec3::new(-away.z, 0.0, away.x);
+            let weave = bot.panic_phase.sin() * 0.75 * bot.panic_side;
+            // Running away also means not running into a wall.
             let inward = -here * 0.05;
-            (away + inward).normalize_or(away)
+            (away + sideways * weave + inward).normalize_or(away)
         } else if let Some(target) = goal {
             (target - here).normalize_or(bot.wander)
         } else {
+            bot.panic_break = 0.0;
             // Drift back toward the middle rather than hugging the wall.
             (bot.wander - here * 0.02).normalize_or(bot.wander)
         };

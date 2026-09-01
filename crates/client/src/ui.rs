@@ -17,9 +17,16 @@ pub struct UiFont(pub Handle<Font>);
 
 const FONT_BYTES: &[u8] = include_bytes!("../../../assets/fonts/DejaVuSans.ttf");
 
-pub fn load_font(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
-    let handle = fonts.add(Font::from_bytes(FONT_BYTES.to_vec()));
-    commands.insert_resource(UiFont(handle));
+/// Ставит шрифт до запуска систем.
+///
+/// Не системой в `Startup`: первый переход состояний происходит раньше него, и
+/// `OnEnter(Menu)` не нашёл бы ресурс.
+pub fn install_font(app: &mut App) {
+    let handle = app
+        .world_mut()
+        .resource_mut::<Assets<Font>>()
+        .add(Font::from_bytes(FONT_BYTES.to_vec()));
+    app.insert_resource(UiFont(handle));
 }
 
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +41,10 @@ pub enum HudBar {
     Energy,
     Health,
 }
+
+/// Всё, что принадлежит игровому интерфейсу и исчезает при выходе в меню.
+#[derive(Component)]
+pub struct GameUi;
 
 #[derive(Component)]
 pub struct MutationPanel;
@@ -74,6 +85,7 @@ pub fn setup_hud(mut commands: Commands, font: Res<UiFont>) {
     // Vitals panel, top left.
     commands
         .spawn((
+            GameUi,
             Node {
                 position_type: PositionType::Absolute,
                 top: Val::Px(16.0),
@@ -111,6 +123,7 @@ pub fn setup_hud(mut commands: Commands, font: Res<UiFont>) {
         });
 
     commands.spawn((
+        GameUi,
         Node {
             position_type: PositionType::Absolute,
             bottom: Val::Px(14.0),
@@ -124,6 +137,7 @@ pub fn setup_hud(mut commands: Commands, font: Res<UiFont>) {
 
     // Death overlay, hidden until it is needed.
     commands.spawn((
+        GameUi,
         DeathOverlay,
         Node {
             position_type: PositionType::Absolute,
@@ -141,6 +155,7 @@ pub fn setup_hud(mut commands: Commands, font: Res<UiFont>) {
     // Mutation panel, hidden until Tab.
     commands
         .spawn((
+            GameUi,
             MutationPanel,
             Node {
                 position_type: PositionType::Absolute,

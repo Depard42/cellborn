@@ -60,8 +60,9 @@ impl Plugin for ServerGamePlugin {
             (
                 advance_environment,
                 ai::bot_movement,
-                ai::wild_mutation,
+                ai::bot_mutation,
                 movement,
+                life::separate_bodies,
                 feeding,
                 life::combat,
                 life::emit_toxins,
@@ -216,6 +217,9 @@ fn feeding(
                     }
                     organism.energy = (organism.energy + energy).min(cap);
                     organism.absorbed += energy;
+                    // Поел — значит рана снова заживает: не нужно ждать, пока
+                    // истечёт боевой откат, если ты сумел поесть под огнём.
+                    organism.combat_timer = 0.0;
                     progress.bites = progress.bites.wrapping_add(1);
                     eaten.push(*entity);
                 }

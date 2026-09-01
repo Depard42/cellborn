@@ -4,7 +4,40 @@ use crate::balance::*;
 use crate::{stats, Direction, Environment, OrganismState, PartFamily, PartKind, PartVariant, Season, BASE_MASS};
 
 /// Half-size of the playable area on the X/Z axes.
-pub const ARENA_HALF_EXTENT: f32 = 35.0;
+pub const ARENA_HALF_EXTENT: f32 = 70.0;
+
+/// How much two bodies may sink into each other before they stop.
+///
+/// Not zero: cells are soft, and a hard constraint at exactly the sum of radii
+/// looks like billiard balls. They squash a little, then hold.
+pub const BODY_SOFTNESS: f32 = 0.18;
+
+/// How far `self` has to move to stop overlapping `other`, or `None` if they are
+/// already apart.
+///
+/// Both the server and the client's prediction call this, so bodies cannot end up
+/// intersecting on one side and separated on the other.
+pub fn overlap_push(
+    self_position: Vec3,
+    self_radius: f32,
+    other_position: Vec3,
+    other_radius: f32,
+) -> Option<Vec3> {
+    let touching = (self_radius + other_radius) * (1.0 - BODY_SOFTNESS);
+    let offset = Vec3::new(
+        self_position.x - other_position.x,
+        0.0,
+        self_position.z - other_position.z,
+    );
+    let distance = offset.length();
+    if distance >= touching {
+        return None;
+    }
+    // Exactly concentric bodies have no direction to separate along; nudge them
+    // apart deterministically rather than dividing by zero.
+    let direction = if distance > 1e-4 { offset / distance } else { Vec3::X };
+    Some(direction * (touching - distance))
+}
 
 /// Oxygen level below which an organism starts to suffer.
 pub const OXYGEN_COMFORT: f32 = 0.80;
@@ -370,6 +403,20 @@ mod tests {
         }
         assert_eq!(far.lineage, parent.lineage);
         assert!(crate::hostile(&parent, &far), "род раскалывается после {KIN_SPLIT_THRESHOLD}");
+    }
+
+    /// Bodies must not be able to occupy the same water.
+    #[test]
+    fn overlapping_bodies_are_pushed_apart() {
+        let (a, b) = (Vec3::ZERO, Vec3::new(0.5, 0.0, 0.0));
+        let push = overlap_push(a, 1.0, b, 1.0).expect("тела перекрываются");
+        assert!(push.x < 0.0, "толкает прочь от соседа");
+        // Applying the push ends the overlap.
+        assert!(overlap_push(a + push, 1.0, b, 1.0).is_none());
+        // Far apart: nothing to resolve.
+        assert!(overlap_push(a, 1.0, Vec3::new(9.0, 0.0, 0.0), 1.0).is_none());
+        // Concentric: still separates instead of dividing by zero.
+        assert!(overlap_push(a, 1.0, a, 1.0).is_some());
     }
 
     /// Client prediction and server authority must not drift apart over time.
