@@ -1,0 +1,13 @@
+[package]
+name = "cellborn-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bevy.workspace = true
+serde.workspace = true
+rand.workspace = true
+tracing.workspace = true
+lightyear.workspace = true
+cellborn-common = { path = "../common" }
