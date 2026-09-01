@@ -86,14 +86,31 @@ pub fn relation_color(
 /// дрейф доходили почти до единицы, а с собственным размером шарика и вовсе
 /// выходили за неё — и внутренности вылезали сквозь оболочку наружу. Тем
 /// заметнее, чем сильнее тело сплющивалось при столкновении.
-const CYTOPLASM_REACH: f32 = 0.55;
-
-/// На какой глубине ползает паразит.
 ///
-/// У самой стенки, а не в середине: в центре он терялся среди органелл, стоило
-/// отрастить их побольше, а по внутренней стенке он читается силуэтом на фоне
-/// мембраны — и сразу видно, что этой клеткой управляет человек.
-const PARASITE_REACH: f32 = 0.74;
+/// Держатся ближе к стенке намеренно: середина отдана паразиту, и так эти двое
+/// не мешают друг другу читаться.
+const CYTOPLASM_REACH: f32 = 0.72;
+
+/// На какой глубине ползает паразит, в долях радиуса тела.
+///
+/// Не у самой стенки. Стояло 0.74, и паразит регулярно вылезал наружу: у него
+/// есть длина и усики, и от его центра до кончика усика ещё около трети
+/// радиуса — вместе это выходило за оболочку. Считать надо не по центру тела,
+/// а по самой дальней его точке, чем и занят тест
+/// `the_parasite_stays_inside_whiskers_and_all`.
+///
+/// Заодно он стал спокойнее: у самой мембраны он метался, потому что при
+/// одинаковой угловой скорости чем дальше от центра, тем быстрее движение по
+/// дуге.
+const PARASITE_REACH: f32 = 0.45;
+
+/// Как далеко паразит тянется от собственного центра — с усиками.
+///
+/// Выведено из его размеров в `build_bodies`: усик стоит на `0.5` по своей оси
+/// Z, тело паразита масштабировано `0.36` по той же оси, сама капсула тянется
+/// ещё примерно на половину длины. Число держится тестом, а не надеждой: любое
+/// изменение размеров паразита обязано его пересчитать.
+const PARASITE_EXTENT: f32 = 0.34;
 
 /// The deformable core. Parts hang off it, so they squash with the body.
 #[derive(Component)]
@@ -285,7 +302,7 @@ pub fn build_bodies(
             let parasite = commands
                 .spawn((
                     Parasite { phase: (entity.to_bits() % 60) as f32 * 0.11 },
-                    Transform::from_xyz(0.18, 0.0, -0.12).with_scale(Vec3::new(0.22, 0.14, 0.42)),
+                    Transform::from_xyz(0.18, 0.0, -0.12).with_scale(Vec3::new(0.20, 0.13, 0.36)),
                     Mesh3d(meshes.add(Sphere::new(1.0).mesh().uv(14, 9))),
                     MeshMaterial3d(materials.add(StandardMaterial {
                         base_color: Color::srgb(0.98, 0.28, 0.58),
@@ -298,7 +315,9 @@ pub fn build_bodies(
                     NotShadowCaster,
                 ))
                 .id();
-            let tail_mesh = meshes.add(Capsule3d::new(0.09, 0.9).mesh().latitudes(4).longitudes(6));
+            // Усики короче прежних: с длинными паразит вылезал сквозь оболочку,
+            // как бы глубоко ни сидел его центр.
+            let tail_mesh = meshes.add(Capsule3d::new(0.08, 0.45).mesh().latitudes(4).longitudes(6));
             let tail_material = materials.add(StandardMaterial {
                 base_color: Color::srgb(0.99, 0.60, 0.78),
                 emissive: LinearRgba::new(1.1, 0.25, 0.5, 1.0),
@@ -307,7 +326,7 @@ pub fn build_bodies(
             for side in [-1.0f32, 1.0] {
                 let whisker = commands
                     .spawn((
-                        Transform::from_xyz(side * 0.5, 0.0, 0.9)
+                        Transform::from_xyz(side * 0.45, 0.0, 0.5)
                             .with_rotation(Quat::from_rotation_x(1.2) * Quat::from_rotation_z(side * 0.4)),
                         Mesh3d(tail_mesh.clone()),
                         MeshMaterial3d(tail_material.clone()),
@@ -810,19 +829,24 @@ pub fn animate_bodies(
             let Ok(parts) = children.get(child) else { continue; };
             for part_root in parts.iter() {
                 if let Ok((parasite, mut inner)) = parasites.get_mut(part_root) {
-                    // Паразит медленно ползает внутри и извивается.
-                    let t = body.phase * 0.5 + parasite.phase;
+                    // Паразит медленно ползает внутри и извивается. Медленно —
+                    // это половина от прежнего: он должен читаться как жилец,
+                    // а не как что-то, мечущееся в панике.
+                    let t = body.phase * 0.24 + parasite.phase;
                     inner.translation = Vec3::new(
                         t.sin(),
                         (t * 0.43).sin() * 0.5,
                         t.cos(),
                     )
                     .normalize_or(Vec3::Z)
-                        * PARASITE_REACH;
+                        // Предел, а не просто множитель: даже если однажды
+                        // кто-то поднимет PARASITE_REACH, кончик усика внутрь
+                        // оболочки всё равно уложится.
+                        * PARASITE_REACH.min(1.0 - PARASITE_EXTENT);
                     // Смотрит по ходу движения вдоль стенки, а не в случайную
                     // сторону: так он читается как ползущее существо.
                     inner.rotation = Quat::from_rotation_y(-t)
-                        * Quat::from_rotation_x((t * 1.7).sin() * 0.25);
+                        * Quat::from_rotation_x((t * 1.1).sin() * 0.18);
                     continue;
                 }
                 if let Ok((organelle, mut inner)) = organelles.get_mut(part_root) {
@@ -928,6 +952,36 @@ mod tests {
         genome
     }
 
+    /// Паразит обязан оставаться внутри оболочки целиком, вместе с усиками.
+    ///
+    /// Считать по его центру недостаточно: у него есть длина, и вылезал он
+    /// именно кончиками. Расчёт повторяет размеры из `build_bodies` — если их
+    /// поменять, не поменяв [`PARASITE_EXTENT`], тест упадёт.
+    #[test]
+    fn the_parasite_stays_inside_whiskers_and_all() {
+        // Размеры паразита и усика, как они заданы при сборке тела.
+        let body_scale = Vec3::new(0.20, 0.13, 0.36);
+        let whisker_at = Vec3::new(0.45, 0.0, 0.5);
+        // Капсула тянется примерно на половину длины плюс радиус в каждую
+        // сторону от своего центра.
+        let whisker_half = 0.45 / 2.0 + 0.08;
+
+        // Самая дальняя точка паразита от его собственного центра.
+        let tip = (whisker_at * body_scale).length() + whisker_half * body_scale.max_element();
+        assert!(
+            tip <= PARASITE_EXTENT + 1e-3,
+            "паразит тянется на {tip:.3}, а PARASITE_EXTENT обещает {PARASITE_EXTENT}"
+        );
+        assert!(
+            PARASITE_REACH + PARASITE_EXTENT < 1.0,
+            "паразит вылезает за оболочку: {} + {} >= 1",
+            PARASITE_REACH,
+            PARASITE_EXTENT
+        );
+        // И он всё ещё заметно глубже внешних органов, а не слился с ними.
+        assert!(PARASITE_REACH < slot_depth(PartFamily::Spike));
+    }
+
     /// Внутренности обязаны оставаться внутри при любой фазе дрейфа.
     ///
     /// Органеллы — дети мембраны, то есть живут в единичной сфере: всё, что
@@ -964,9 +1018,13 @@ mod tests {
             } else {
                 assert!(depth < 0.6, "{} должен быть внутри", family.name());
             }
-            // Паразит ползает глубже внешних органов и дальше цитоплазмы —
-            // иначе он снова потеряется среди органелл.
-            assert!(PARASITE_REACH > CYTOPLASM_REACH);
+            // Паразит живёт в середине, цитоплазма — у стенки. Так они не
+            // накладываются друг на друга: раньше паразит терялся среди
+            // органелл именно потому, что плавал с ними в одном слое.
+            assert!(
+                PARASITE_REACH < CYTOPLASM_REACH,
+                "паразит и цитоплазма в одном слое: паразита не будет видно"
+            );
         }
     }
 

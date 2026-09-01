@@ -60,11 +60,20 @@ fn spawn_thorn_visuals(
             Visibility::default(),
         ));
 
-        let core = meshes.add(Sphere::new(thorn.radius * 0.42).mesh().uv(16, 12));
-        let spine = meshes.add(Cone {
-            radius: thorn.radius * 0.16,
-            height: thorn.radius * 0.72,
-        });
+        // Сердцевина маленькая: куст — это в основном иглы и пустота между
+        // ними, иначе внутри негде прятаться.
+        let core = meshes.add(Sphere::new(thorn.radius * 0.22).mesh().uv(16, 12));
+        // Три длины игл вместо одной: ровные иглы одинаковой длины читаются как
+        // морской ёж, а нужен куст — неровный, с просветами.
+        let spines: Vec<Handle<Mesh>> = [0.55f32, 0.78, 1.0]
+            .iter()
+            .map(|length| {
+                meshes.add(Cone {
+                    radius: thorn.radius * 0.055,
+                    height: thorn.radius * 0.78 * length,
+                })
+            })
+            .collect();
 
         commands.entity(entity).with_children(|parent| {
             parent.spawn((
@@ -78,13 +87,16 @@ fn spawn_thorn_visuals(
 
             // Иглы по золотому углу, как и органы на теле: так они не сбиваются
             // в пучки при любом их количестве.
-            for i in 0..26 {
+            for i in 0..64 {
                 let dir = slot_direction(i);
+                // Длина и вылет чередуются, чтобы куст был неровным.
+                let variant = i % spines.len();
+                let reach = 0.34 + variant as f32 * 0.14;
                 parent.spawn((
                     ThornSpine,
-                    Transform::from_translation(dir * thorn.radius * 0.55)
+                    Transform::from_translation(dir * thorn.radius * reach)
                         .with_rotation(Quat::from_rotation_arc(Vec3::Y, dir)),
-                    Mesh3d(spine.clone()),
+                    Mesh3d(spines[variant].clone()),
                     MeshMaterial3d(materials.add(StandardMaterial {
                         base_color: SHELTER,
                         emissive: LinearRgba::from(SHELTER) * 0.4,
@@ -163,11 +175,40 @@ fn spawn_leviathan_visuals(
     }
 }
 
-fn animate_leviathans(mut beasts: Query<(&Leviathan, &mut Transform)>) {
-    for (beast, mut transform) in &mut beasts {
+/// Чудовище должно плыть, а не скользить.
+///
+/// Фаза хвоста приходит с сервера, поэтому все видят одно и то же существо:
+/// считай её клиент сам, у двух игроков рядом оно извивалось бы вразнобой.
+fn animate_leviathans(
+    beasts: Query<(&Leviathan, &Children, &mut Transform)>,
+    mut parts: Query<&mut Transform, Without<Leviathan>>,
+) {
+    for (beast, children, mut transform) in beasts {
         transform.translation = beast.position;
         // Смотрит туда, куда плывёт: иначе туша идёт боком.
-        transform.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, beast.heading);
+        let facing = Quat::from_rotation_arc(Vec3::NEG_Z, beast.heading);
+        // Тело переваливается на ходу — от этого туша выглядит тяжёлой.
+        let roll = (beast.swim * 0.5).sin() * 0.12;
+        transform.rotation = facing * Quat::from_rotation_z(roll);
+
+        for (index, child) in children.iter().enumerate() {
+            let Ok(mut part) = parts.get_mut(child) else { continue };
+            match index {
+                // Туловище: медленный изгиб вдоль оси движения.
+                0 => {
+                    part.rotation = Quat::from_rotation_y(beast.swim.sin() * 0.10);
+                    // Наевшееся раздувается: по брюху видно, сколько оно съело.
+                    let belly = 1.0 + beast.fed * 0.06;
+                    part.scale = Vec3::new(0.62 * belly, 0.45 * belly, 1.7);
+                }
+                // Плавники бьют в противофазе друг другу.
+                _ => {
+                    let side = if index == 1 { 1.0 } else { -1.0 };
+                    part.rotation =
+                        Quat::from_rotation_z((beast.swim * 1.4 + side).sin() * 0.35 * side);
+                }
+            }
+        }
     }
 }
 

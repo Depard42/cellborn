@@ -235,6 +235,25 @@ fn main() {
         );
     }
 
+    println!("\n=== КОЛЮЧКИ: КТО В НИХ ПОМЕЩАЕТСЯ ===\n");
+    println!("Порог укрытия: радиус тела {THORN_SAFE_RADIUS:.2}, радиус куста {THORN_RADIUS:.1}\n");
+    println!("{:<10} {:>8} {:>9} {:>12}", "частей", "масса", "радиус", "в кусте");
+    for parts in [3, 5, 8, 12, 16, 20, 30] {
+        let mut genome = Genome::starter_of(1);
+        // Добираем случайными органами: так растёт настоящее тело.
+        for i in 3..parts {
+            genome.push_part(random_part(i as u64 * 7919));
+        }
+        let organism = OrganismState::from_genome(genome);
+        let radius = body_radius(organism.mass);
+        println!(
+            "{parts:<10} {:>8.1} {:>9.2} {:>12}",
+            organism.mass,
+            radius,
+            if Thorn::hurts(radius) { "режет" } else { "прячется" }
+        );
+    }
+
     println!("\n=== БОЙ ДЛЯ СРАВНЕНИЯ ===\n");
     let spiky = body(&[PartKind::basic(PartFamily::Spike)]);
     println!(

@@ -156,6 +156,8 @@ pub fn bot_perception(
     food: Res<FoodGrid>,
     field: Res<PollutionField>,
     clouds: Query<&ToxinCloud>,
+    beasts: Query<&Leviathan>,
+    thorns: Query<&Thorn>,
     // One set: the snapshot of everyone, then the bots we actually steer. Both
     // touch PlayerPosition, so they cannot be two independent queries.
     mut sets: ParamSet<(
@@ -288,6 +290,35 @@ pub fn bot_perception(
             // Сетка вместо перебора всех девятисот частиц: поиск идёт кольцами
             // от клетки бота и обрывается, как только ближе уже быть не может.
             goal = food.nearest(here, config.bot_vision);
+        }
+
+        // Левиафан — не противник, а погода: от него не отбиваются, от него
+        // уходят. Причём заранее и в сторону, а не по курсу: убегать по прямой
+        // от того, кто быстрее тебя, бессмысленно.
+        for beast in &beasts {
+            let offset = here - beast.position;
+            let distance = offset.length();
+            if distance > beast.radius + config.bot_vision {
+                continue;
+            }
+            // Вбок от его курса, а не прочь от туши: так уходят с дороги.
+            let sideways = beast.heading.cross(Vec3::Y).normalize_or(Vec3::X);
+            let side = if sideways.dot(offset) < 0.0 { -1.0 } else { 1.0 };
+            let urgency = (beast.radius * 2.5 / distance.max(1.0)).min(6.0);
+            escape += sideways * side * urgency;
+        }
+
+        // Куст: укрытие для мелкого, стена для крупного. Крупный обходит его
+        // так же, как обходил бы отраву.
+        if Thorn::hurts(body_radius(organism.mass)) {
+            for thorn in &thorns {
+                let offset = here - thorn.position;
+                let distance = offset.length();
+                if distance > thorn.radius + body_radius(organism.mass) + 2.0 {
+                    continue;
+                }
+                avoid += offset.normalize_or(Vec3::X) * 2.0;
+            }
         }
 
         bot.perception = Perception { goal, escape, avoid };

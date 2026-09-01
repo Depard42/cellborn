@@ -115,13 +115,23 @@ pub fn summon_leviathan(
     let heading = (heading + heading.cross(Vec3::Y) * drift).normalize_or(heading);
 
     commands.spawn((
-        Leviathan { position: from, heading, radius: LEVIATHAN_RADIUS },
+        Leviathan {
+            position: from,
+            heading,
+            radius: LEVIATHAN_RADIUS,
+            fed: 0.0,
+            swim: 0.0,
+        },
         Replicate::to_clients(NetworkTarget::All),
     ));
     info!("через море идёт левиафан");
 }
 
-/// Движение чудовища и то, что случается с задетыми.
+/// Жизнь чудовища за один тик: куда оно повернуло, кого съело, что оставило.
+///
+/// Оно не декорация и не движущаяся стена. Оно замечает добычу поблизости и
+/// лениво доворачивает к ней, глотает то, до чего дотянулось, наедается и
+/// теряет интерес, а за собой оставляет объедки — то, что не доело.
 pub fn leviathan_pass(
     mut commands: Commands,
     config: Res<ServerConfig>,
@@ -131,13 +141,41 @@ pub fn leviathan_pass(
 ) {
     let dt = time.delta_secs();
     let gone = ARENA_HALF_EXTENT + LEVIATHAN_RADIUS * 3.0;
+    let mut rng = rand::rng();
 
     for (entity, mut beast) in &mut beasts {
+        // Хвост считается на сервере, чтобы все видели одно и то же существо.
+        beast.swim += dt * (1.6 + config.leviathan_speed * 0.12);
+
+        // Кого оно заметило. Голодное сворачивает к ближайшему, сытое просто
+        // идёт своей дорогой.
+        if !beast.sated() {
+            let mut nearest = LEVIATHAN_INTEREST;
+            let mut toward = None;
+            for (position, _, progress) in &organisms {
+                if progress.dead {
+                    continue;
+                }
+                let offset = position.0 - beast.position;
+                let distance = offset.length();
+                // Только то, что впереди: разворачиваться назад оно не станет.
+                if distance < nearest && offset.dot(beast.heading) > 0.0 {
+                    nearest = distance;
+                    toward = Some(offset / distance.max(1e-3));
+                }
+            }
+            if let Some(toward) = toward {
+                // Доворот ограничен: от туши, вертящейся как истребитель, уйти
+                // невозможно, и событие превратилось бы в казнь.
+                let turn = (LEVIATHAN_TURN * dt).min(1.0);
+                beast.heading = beast.heading.lerp(toward, turn).normalize_or(beast.heading);
+            }
+        }
+
         let step = beast.heading * config.leviathan_speed * dt;
         beast.position += step;
 
-        // Ушёл за горизонт — исчез. Никаких разворотов: он проплывает мимо,
-        // а не патрулирует.
+        // Ушёл за горизонт — исчез. Оно проплывает мимо, а не патрулирует.
         if beast.position.x.abs() > gone || beast.position.z.abs() > gone {
             commands.entity(entity).despawn();
             continue;
@@ -153,8 +191,32 @@ pub fn leviathan_pass(
             }
             // Не бой, а несчастный случай: сопротивляться нечем, защита не
             // помогает, шипы не отвечают. Можно только не попасться.
+            let before = organism.health;
             organism.health = (organism.health - config.leviathan_damage * dt).max(0.0);
             organism.combat_timer = config.combat_regen_block;
+
+            // Проглотило целиком — наелось и оставило объедки. Именно объедки
+            // делают его проход событием, а не просто опасностью: после него
+            // есть чем поживиться тем, кто держался в стороне.
+            if before > 0.0 && organism.health <= 0.0 {
+                beast.fed += 1.0;
+                let leftovers = LEVIATHAN_LEFTOVERS.min(4 + (organism.mass / 6.0) as usize);
+                for _ in 0..leftovers {
+                    let scatter = Vec3::new(
+                        rng.random_range(-3.5..3.5),
+                        rng.random_range(-0.4..0.9),
+                        rng.random_range(-3.5..3.5),
+                    );
+                    commands.spawn((
+                        Nutrient {
+                            kind: FoodKind::Detritus,
+                            energy: FoodKind::Detritus.energy(),
+                        },
+                        FoodPosition(position.0 + scatter),
+                        Replicate::to_clients(NetworkTarget::All),
+                    ));
+                }
+            }
         }
     }
 }
