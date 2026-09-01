@@ -3,7 +3,7 @@ use bevy::prelude::*;
 use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::{FoodPosition, Genome, Nutrient, OrganismState, PartKind, ToxinCloud};
+use crate::{FoodPosition, Genome, Nutrient, OrganismState, PartKind, Pollution, ToxinCloud};
 
 #[derive(Component, Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct PlayerId(pub PeerId);
@@ -202,6 +202,7 @@ impl Plugin for ProtocolPlugin {
         app.component::<Nutrient>().replicate();
         app.component::<FoodPosition>().replicate();
         app.component::<ToxinCloud>().replicate();
+        app.component::<Pollution>().replicate();
     }
 }
 

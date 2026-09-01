@@ -167,6 +167,31 @@ pub fn mutation_chance_with(organism: &OrganismState, base: f32) -> f32 {
         .clamp(0.0, 0.95)
 }
 
+/// Урон здоровью в секунду от **местной** отравы: облаков и грязи.
+///
+/// `local_toxin` — это только то, что добавлено к воде здесь: чужие облака и
+/// загрязнение от скопления. Сезонный фон сюда не входит намеренно.
+///
+/// Разделение не косметическое. Фон шторма — 0.15 яда при базовой стойкости
+/// тела 0.06, и если бы урон считался от полного уровня, каждый шторм убивал бы
+/// всё живое на всей арене независимо от того, кто где стоит. Это ровно то, что
+/// и случилось при первой попытке: двести отравленных за пять минут.
+///
+/// Поэтому давления два, и они разные. Сезон давит **энергией** через штраф
+/// адаптации — от него спасают жабры, термомембрана, осморегулятор. Местная
+/// отрава давит **здоровьем** — от неё спасают стойкость и умение уйти.
+///
+/// Превышение считается над собственной стойкостью: своя железа делает своё же
+/// облако терпимым, в этом её смысл.
+pub fn toxin_damage(organism: &OrganismState, local_toxin: f32) -> f32 {
+    toxin_damage_with(organism, local_toxin, TOXIN_DAMAGE)
+}
+
+/// То же с серверным коэффициентом.
+pub fn toxin_damage_with(organism: &OrganismState, local_toxin: f32, rate: f32) -> f32 {
+    (local_toxin - organism.toxin_resistance).max(0.0) * rate
+}
+
 /// Toxin per second this organism leaks into the water around it.
 pub fn toxin_emission(organism: &OrganismState) -> f32 {
     organism.genome.parts.iter().map(|p| stats(p.kind).toxin_emission).sum()

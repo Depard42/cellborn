@@ -191,7 +191,14 @@ settings! {
         bot_vision: f32 = BOT_VISION, "На каком расстоянии бот видит еду и врагов";
     }
 
+    "загрязнение воды" {
+        pollution_per_upkeep: f32 = POLLUTION_PER_UPKEEP,
+            "Сколько грязи в секунду даёт единица содержания тела (0 — выключить)";
+    }
+
     "ядовитые облака" {
+        toxin_damage: f32 = TOXIN_DAMAGE,
+            "Урон здоровью в секунду за единицу яда сверх стойкости организма";
         toxin_interval: f32 = TOXIN_INTERVAL, "Раз во сколько секунд железа оставляет облако";
         toxin_lifetime: f32 = TOXIN_LIFETIME, "Сколько секунд живёт облако";
         toxin_radius: f32 = TOXIN_RADIUS, "Радиус облака";
@@ -299,6 +306,8 @@ fn sanitize(config: &mut ServerConfig) {
     config.mutation_cooldown = config.mutation_cooldown.max(0.0);
     config.toxin_lifetime = config.toxin_lifetime.max(0.5);
     config.toxin_radius = config.toxin_radius.max(0.5);
+    config.toxin_damage = config.toxin_damage.max(0.0);
+    config.pollution_per_upkeep = config.pollution_per_upkeep.max(0.0);
     config.bot_vision = config.bot_vision.max(1.0);
 }
 

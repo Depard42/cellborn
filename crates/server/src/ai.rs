@@ -130,7 +130,20 @@ pub struct Perception {
     pub goal: Option<Vec3>,
     /// Суммарное направление «прочь» от всех угроз, ноль — если бояться некого.
     pub escape: Vec3,
+    /// Куда сместиться из отравы. Отдельно от `escape` намеренно: от хищника
+    /// бегут, бросив всё, а из грязи выползают по пути, продолжая жить.
+    ///
+    /// Когда яд считался паникой, боты переставали есть и вымирали от голода
+    /// посреди еды — при том, что уплыть было всего на клетку в сторону.
+    pub avoid: Vec3,
 }
+
+/// Как далеко бот щупает воду, выбирая, куда отплыть из отравы.
+///
+/// Порядка клетки загрязнения: щупать ближе бессмысленно (попадёшь в ту же
+/// клетку), дальше — начнёшь «видеть» грязь за пределами того, куда успеешь
+/// доплыть до следующего раздумья.
+const POISON_PROBE: f32 = POLLUTION_CELL;
 
 /// Оценка обстановки: кого бояться, кого есть, куда плыть.
 ///
@@ -141,6 +154,8 @@ pub fn bot_perception(
     config: Res<ServerConfig>,
     time: Res<Time>,
     food: Res<FoodGrid>,
+    field: Res<PollutionField>,
+    clouds: Query<&ToxinCloud>,
     // One set: the snapshot of everyone, then the bots we actually steer. Both
     // touch PlayerPosition, so they cannot be two independent queries.
     mut sets: ParamSet<(
@@ -168,6 +183,14 @@ pub fn bot_perception(
         .collect();
 
     let vision_squared = config.bot_vision * config.bot_vision;
+    let clouds: Vec<ToxinCloud> = clouds.iter().copied().collect();
+
+    // Отрава в точке: чужие облака плюс грязь. Ровно то же, что считает
+    // `survival` — бот обязан бояться того же, от чего умирает.
+    let poison_at = |point: Vec3| {
+        clouds.iter().map(|c| c.toxin_at(point)).sum::<f32>()
+            + field.at(point) * POLLUTION_MAX_TOXIN
+    };
 
     for (entity, brain, position, organism, progress, mut bot) in &mut sets.p1() {
         bot.think_in -= dt;
@@ -233,13 +256,41 @@ pub fn bot_perception(
             }
         }
 
+        // Отрава — это градиент, вдоль которого сползают, а не повод бросить всё.
+        //
+        // Без этого урон от яда был лотереей: организмы стояли в чужом облаке,
+        // пока не умирали, потому что в их картине мира яда не существовало.
+        let mut avoid = Vec3::ZERO;
+        let poison_here = poison_at(here);
+        if poison_here > organism.toxin_resistance {
+            // Щупаем четыре стороны и уходим в самую чистую. Четырёх хватает:
+            // раздумье повторяется десять раз в секунду, и бот доворачивает на
+            // ходу, а не выбирает идеальный маршрут один раз.
+            let mut best = poison_here;
+            let mut away = Vec3::ZERO;
+            for direction in [Vec3::X, Vec3::NEG_X, Vec3::Z, Vec3::NEG_Z] {
+                let there = poison_at(here + direction * POISON_PROBE);
+                if there < best {
+                    best = there;
+                    away = direction;
+                }
+            }
+            // Со всех сторон одинаково плохо — плывём хоть куда-нибудь, но
+            // прочь: стоять на месте в отраве худший из вариантов.
+            let away = away.normalize_or(bot.wander);
+            // Чем гуще отрава, тем сильнее она перетягивает курс. Но именно
+            // перетягивает: еду бот при этом искать не перестаёт.
+            let urgency = (poison_here / organism.toxin_resistance.max(0.01)).min(4.0);
+            avoid = away * urgency;
+        }
+
         if goal.is_none() && hungry && escape == Vec3::ZERO {
             // Сетка вместо перебора всех девятисот частиц: поиск идёт кольцами
             // от клетки бота и обрывается, как только ближе уже быть не может.
             goal = food.nearest(here, config.bot_vision);
         }
 
-        bot.perception = Perception { goal, escape };
+        bot.perception = Perception { goal, escape, avoid };
     }
 }
 
@@ -271,7 +322,7 @@ pub fn bot_movement(
             continue;
         }
         let here = position.0;
-        let Perception { goal, escape } = bot.perception;
+        let Perception { goal, escape, avoid } = bot.perception;
 
         bot.retarget -= dt;
         if bot.retarget <= 0.0 {
@@ -299,15 +350,18 @@ pub fn bot_movement(
             let inward = -here * 0.05;
             (away + sideways * weave + inward).normalize_or(away)
         } else if let Some(target) = goal {
-            (target - here).normalize_or(bot.wander)
+            // Плывём к цели, но отрава по пути сдвигает курс: можно есть и
+            // одновременно выбираться из грязного места.
+            ((target - here).normalize_or(bot.wander) + avoid).normalize_or(bot.wander)
         } else {
             bot.panic_break = 0.0;
             // Drift back toward the middle rather than hugging the wall.
-            (bot.wander - here * 0.02).normalize_or(bot.wander)
+            (bot.wander - here * 0.02 + avoid).normalize_or(bot.wander)
         };
 
         // Fear is fast: a fleeing cell spends everything it has on getting away.
-        let speed = movement_speed(organism) * if escape != Vec3::ZERO { 1.15 } else { 1.0 };
+        let hurried = escape != Vec3::ZERO || avoid != Vec3::ZERO;
+        let speed = movement_speed(organism) * if hurried { 1.15 } else { 1.0 };
         step_movement_vec(&mut position.0, direction, speed, dt);
     }
 }

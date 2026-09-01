@@ -341,6 +341,7 @@ pub fn survival(
     env: Res<Environment>,
     time: Res<Time>,
     clouds: Query<&ToxinCloud>,
+    field: Res<PollutionField>,
     mut query: Query<(&PlayerPosition, &mut OrganismState, &PlayerProgress)>,
 ) {
     let dt = time.delta_secs();
@@ -352,8 +353,15 @@ pub fn survival(
         organism.age += dt;
 
         // Local water, not global: a toxin cloud is a place, not a season.
+        // Грязь от соседей считается тем же ядом: для тела нет разницы, чем
+        // испорчена вода — чужой железой или чужим обменом веществ.
+        // Отрава именно этого места: чужие облака плюс грязь от скопления.
+        // Держим её отдельно от сезонного фона — по здоровью бьёт только она.
+        let here = clouds.iter().map(|c| c.toxin_at(position.0)).sum::<f32>()
+            + field.at(position.0) * POLLUTION_MAX_TOXIN;
+
         let mut local = env.clone();
-        local.toxin_level += clouds.iter().map(|c| c.toxin_at(position.0)).sum::<f32>();
+        local.toxin_level += here;
 
         let cap = organism.energy_cap();
         let drain =
@@ -362,13 +370,83 @@ pub fn survival(
         organism.energy = (organism.energy + (gain - drain) * dt).clamp(0.0, cap);
 
         organism.combat_timer = (organism.combat_timer - dt).max(0.0);
+
+        // Яд бьёт по здоровью, а не только по кошельку. Раньше отравление
+        // выражалось лишь в расходе энергии, и сытый организм его не замечал:
+        // при девятистах частицах еды в воде это значило «ешь чуть чаще».
+        let poison = toxin_damage_with(&organism, here, config.toxin_damage);
+        if poison > 0.0 {
+            organism.health = (organism.health - poison * dt).max(0.0);
+        }
+
         if organism.energy <= 0.0 {
             organism.health = (organism.health - config.starvation_damage * dt).max(0.0);
-        } else if organism.energy > cap * config.well_fed_fraction && organism.combat_timer <= 0.0 {
+        } else if organism.energy > cap * config.well_fed_fraction
+            && organism.combat_timer <= 0.0
+            // Регенерация не должна затирать отравление: иначе в слабом облаке
+            // организм лечится ровно с той же скоростью, с какой травится, и
+            // яд снова оказывается бесплатным.
+            && poison <= 0.0
+        {
             organism.health = (organism.health + config.health_regen * dt).min(MAX_HEALTH);
         }
     }
 }
+
+/// Организмы пачкают воду вокруг себя, вода понемногу очищается.
+///
+/// Без этого центр арены был лучшим местом в мире: еда сыплется равномерно, а
+/// в середине ещё и все соседи, которых можно съесть. Скопление ничем не
+/// наказывалось, и игра сводилась к куче-мале. Теперь у скопления есть цена,
+/// растущая быстрее выгоды.
+pub fn pollute(
+    config: Res<ServerConfig>,
+    time: Res<Time>,
+    mut field: ResMut<PollutionField>,
+    organisms: Query<(&PlayerPosition, &OrganismState, &PlayerProgress)>,
+) {
+    let dt = time.delta_secs();
+    for (position, organism, progress) in &organisms {
+        if progress.dead {
+            continue;
+        }
+        // Гадит обмен веществ, а не масса: крупное тело с дешёвыми органами
+        // пачкает воду меньше, чем мелкое, но прожорливое.
+        let waste = metabolic_cost(organism) * config.pollution_per_upkeep;
+        field.add(position.0, waste * dt);
+    }
+    field.settle(dt);
+}
+
+/// Складывает поле в реплицируемый компонент — не чаще, чем его успевают
+/// отправить, и только когда оно правда изменилось.
+pub fn project_pollution(
+    time: Res<Time>,
+    field: Res<PollutionField>,
+    mut projection: Query<&mut Pollution>,
+    mut since: Local<f32>,
+) {
+    *since += time.delta_secs();
+    if *since < POLLUTION_SEND_INTERVAL {
+        return;
+    }
+    *since = 0.0;
+    for mut pollution in &mut projection {
+        // `quantise` пишет в компонент только при настоящем изменении: иначе
+        // Bevy пометил бы его изменённым, и триста байт уезжали бы по сети
+        // просто потому, что мы на них посмотрели.
+        let mut updated = pollution.clone();
+        if field.quantise(&mut updated) {
+            *pollution = updated;
+        }
+    }
+}
+
+/// Как часто карта загрязнения уезжает клиентам.
+///
+/// Грязь меняется медленно — её видно как пятно, а не как вспышку, и десять
+/// раз в секунду тут не нужны никому.
+const POLLUTION_SEND_INTERVAL: f32 = 0.5;
 
 /// Как часто сервер вообще думает о делении.
 ///
@@ -489,10 +567,17 @@ pub fn deaths(
             ));
         }
         // combat_timer is still running if the last damage came from a fight,
-        // which is what separates "killed" from "starved" in the log.
+        // which is what separates "killed" from "starved" in the log. Яд —
+        // третий случай: энергия ещё есть, а здоровья уже нет.
         info!(
             "died: {} | поколение {}, частей {}, масса {:.1}{}",
-            if organism.combat_timer > 0.0 { "убит" } else { "голод" },
+            if organism.combat_timer > 0.0 {
+                "убит"
+            } else if organism.energy > 0.0 {
+                "отравлен"
+            } else {
+                "голод"
+            },
             organism.genome.generation,
             organism.genome.parts.len(),
             organism.mass,

@@ -59,6 +59,7 @@ impl Plugin for ServerGamePlugin {
         app.init_resource::<RequestCooldowns>();
         app.init_resource::<FoodGrid>();
         app.init_resource::<TickClock>();
+        app.init_resource::<PollutionField>();
         app.insert_resource(SeasonWatch(Season::Bloom));
         app.add_systems(Startup, start_server);
         // Порядок несущий: движение → расталкивание → еда → бой. Тело сначала
@@ -86,12 +87,28 @@ impl Plugin for ServerGamePlugin {
                 )
                     .chain(),
                 // Что с ним из-за этого случилось.
-                (feeding, life::combat, life::emit_toxins, life::decay_toxins, life::survival)
+                (
+                    feeding,
+                    life::combat,
+                    life::emit_toxins,
+                    life::decay_toxins,
+                    // Пачкают воду до того, как она их травит: иначе организм
+                    // успевает уплыть из грязи, которую сам только что оставил.
+                    life::pollute,
+                    life::survival,
+                )
                     .chain(),
                 // Кто родился, кто умер, чем зарос мир.
                 (life::divide, life::deaths, life::respawn, spawn_food, ai::maintain_wild).chain(),
                 // Что об этом узнают наружу.
-                (census_log, project_state, broadcast_state, metrics::tick_end).chain(),
+                (
+                    census_log,
+                    project_state,
+                    life::project_pollution,
+                    broadcast_state,
+                    metrics::tick_end,
+                )
+                    .chain(),
             )
                 .chain(),
         );
@@ -125,6 +142,15 @@ fn start_server(mut commands: Commands, config: Res<ServerConfig>) {
         ))
         .id();
     commands.trigger(Start { entity: server });
+
+    // Карта загрязнения — одна на мир, поэтому и сущность у неё одна. Компонент
+    // на каждом организме означал бы семьдесят копий одного и того же.
+    commands.spawn((
+        Name::new("Вода"),
+        Pollution::default(),
+        Replicate::to_clients(NetworkTarget::All),
+    ));
+
     info!("Server listening on {}", bind_addr(config.port));
 }
 
@@ -427,6 +453,7 @@ fn broadcast_state(
     clock: Res<TickClock>,
     grid: Res<FoodGrid>,
     clouds: Query<&ToxinCloud>,
+    field: Res<PollutionField>,
     organisms: Query<(&PlayerId, &PlayerPosition)>,
     census: Query<(), With<PlayerGenome>>,
     mut clients: Query<ClientChannels, With<ClientOf>>,
@@ -473,6 +500,7 @@ fn broadcast_state(
                 .find(|(id, _)| id.0 == remote.0)
                 .map(|(_, position)| {
                     clouds.iter().map(|c| c.toxin_at(position.0)).sum::<f32>()
+                        + field.at(position.0) * POLLUTION_MAX_TOXIN
                 })
                 .unwrap_or(0.0);
             world.send::<StateChannel>(WorldUpdate {
@@ -503,6 +531,7 @@ fn census_log(
     time: Res<Time>,
     clock: Res<TickClock>,
     grid: Res<FoodGrid>,
+    field: Res<PollutionField>,
     mut next: Local<f32>,
     organisms: Query<&PlayerGenome>,
     clouds: Query<(), With<ToxinCloud>>,
@@ -535,6 +564,14 @@ fn census_log(
         parts,
         clouds.iter().count()
     );
+    if field.worst() > 0.05 {
+        info!(
+            "вода: самая грязная клетка {:.0}% (это {:.2} яда, стойкость голого тела {:.2})",
+            field.worst() * 100.0,
+            field.worst() * POLLUTION_MAX_TOXIN,
+            BASE_TOXIN_RESISTANCE
+        );
+    }
     // Та же сводка, что уходит в оверлей по F1, но её видно и без клиента.
     // Пик важнее среднего: он показывает, насколько близко тик подходит к своему
     // бюджету в худшем случае, а не в среднем по секунде.
