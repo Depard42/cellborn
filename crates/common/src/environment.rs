@@ -68,28 +68,32 @@ impl Environment {
         match self.season {
             Season::Bloom => {
                 self.temperature = 0.45 + phase * 0.10;
-                self.salinity = 0.45;
+                self.salinity = 0.42;
                 self.oxygen = 0.90;
                 self.toxin_level = 0.03;
                 self.food_density = 1.40;
             }
             Season::Hot => {
-                self.temperature = 0.75;
-                self.salinity = 0.50 + phase * 0.15;
+                self.temperature = 0.78;
+                // Солёность к концу жары уходит далеко за терпимость голого
+                // тела (0.16 от середины) — иначе осморегулятору нечего было бы
+                // компенсировать, и он был бесполезен во всех четырёх сезонах.
+                self.salinity = 0.52 + phase * 0.30;
                 self.oxygen = 0.60;
                 self.toxin_level = 0.08;
                 self.food_density = 0.80;
             }
             Season::Storm => {
                 self.temperature = 0.55;
-                self.salinity = 0.40;
+                // Ливень опресняет воду: в другую сторону, но так же далеко.
+                self.salinity = 0.22;
                 self.oxygen = 0.45;
                 self.toxin_level = 0.15;
                 self.food_density = 0.65;
             }
             Season::Cold => {
-                self.temperature = 0.20;
-                self.salinity = 0.55;
+                self.temperature = 0.16;
+                self.salinity = 0.58;
                 self.oxygen = 0.70;
                 self.toxin_level = 0.04;
                 self.food_density = 0.90;

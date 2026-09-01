@@ -10,9 +10,16 @@
 use bevy::prelude::*;
 use cellborn_common::*;
 
+/// Среда в разгаре сезона, а не в его первую секунду.
+///
+/// Часть давлений нарастает по ходу сезона — солёность в жару, температура в
+/// цветение. Замер на нулевой фазе показывал бы самый мягкий момент и врал бы о
+/// том, ради чего органы вообще растят.
 fn env_for(season: Season) -> Environment {
     let mut env = Environment::default();
     env.season = season;
+    // Восемь десятых сезона: пик давления, но ещё не смена.
+    env.time_in_season = env.season_length * 0.8;
     env.advance(0.0);
     env
 }
@@ -139,6 +146,69 @@ fn main() {
     }
     println!("\nОриентир: одно тело — незаметно, десяток — неприятно,");
     println!("толпа — смертельно. Здоровья {MAX_HEALTH:.0}, регенерация {HEALTH_REGEN} в секунду.");
+
+    println!("\n=== АДАПТИВНЫЕ ОРГАНЫ: ОКУПАЮТСЯ ЛИ ===\n");
+    // Орган снижает штраф среды, но сам требует содержания и добавляет массу.
+    // Вопрос ровно один: чистая разница расхода. Если она около нуля или в
+    // минус, орган — украшение.
+    let adaptive = [
+        ("жабра", PartFamily::Gill),
+        ("2 жабры", PartFamily::Gill),
+        ("термомембрана", PartFamily::ThermalMembrane),
+        ("осморегулятор", PartFamily::Osmoregulator),
+        ("слизь", PartFamily::MucusCoat),
+    ];
+    print!("{:<16}", "орган");
+    for season in [Season::Bloom, Season::Hot, Season::Storm, Season::Cold] {
+        print!("{:>10}", season.name());
+    }
+    println!("   (выигрыш расхода, + значит дешевле)");
+
+    for (index, (name, family)) in adaptive.iter().enumerate() {
+        let count = if index == 1 { 2 } else { 1 };
+        let parts: Vec<PartKind> = (0..count).map(|_| PartKind::basic(*family)).collect();
+        let adapted = body(&parts);
+        print!("{name:<16}");
+        for season in [Season::Bloom, Season::Hot, Season::Storm, Season::Cold] {
+            let env = env_for(season);
+            let saved = energy_drain(&plain, &env) - energy_drain(&adapted, &env);
+            print!("{saved:>10.3}");
+        }
+        println!();
+    }
+
+    println!("\nИ то же в долях: во сколько раз дольше живёт голодающий с органом.\n");
+    print!("{:<16}", "орган");
+    for season in [Season::Bloom, Season::Hot, Season::Storm, Season::Cold] {
+        print!("{:>10}", season.name());
+    }
+    println!();
+    for (index, (name, family)) in adaptive.iter().enumerate() {
+        let count = if index == 1 { 2 } else { 1 };
+        let parts: Vec<PartKind> = (0..count).map(|_| PartKind::basic(*family)).collect();
+        let adapted = body(&parts);
+        print!("{name:<16}");
+        for season in [Season::Bloom, Season::Hot, Season::Storm, Season::Cold] {
+            let env = env_for(season);
+            let ratio = starve_seconds(&adapted, &env) / starve_seconds(&plain, &env);
+            print!("{ratio:>10.2}");
+        }
+        println!();
+    }
+
+    println!("\nШтраф адаптации зажат потолком {:.1}. Сколько его съедает сам сезон,", 3.0);
+    println!("до всяких облаков:\n");
+    for season in [Season::Bloom, Season::Hot, Season::Storm, Season::Cold] {
+        let env = env_for(season);
+        let penalty = adaptation_penalty(&plain, &env);
+        println!(
+            "  {:<8} штраф {:.2} из 3.00 ({:.0}% потолка), из них база {:.2}",
+            season.name(),
+            penalty,
+            penalty / 3.0 * 100.0,
+            BASE_PENALTY
+        );
+    }
 
     println!("\n=== ТО ЖЕ, НО ПРОГОНОМ НАСТОЯЩЕГО ПОЛЯ ===\n");
     // Формула выше — оценка. Здесь крутится тот самый `PollutionField`,

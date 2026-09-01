@@ -167,6 +167,26 @@ pub fn mutation_chance_with(organism: &OrganismState, base: f32) -> f32 {
         .clamp(0.0, 0.95)
 }
 
+/// Урон здоровью в секунду от нехватки кислорода.
+///
+/// Единственное давление среды, которое бьёт по здоровью, а не по кошельку.
+/// Всё прочее несоответствие среде остаётся платой энергией: температуру и
+/// солёность можно перетерпеть, наевшись впрок, а задохнуться — нельзя.
+///
+/// Заживление при этом **не блокируется**, в отличие от отравы. Разница
+/// намеренная: из ядовитого места надо уплыть, а из шторма уплыть некуда, он
+/// накрывает всю арену. Поэтому сытый организм шторм переживает, а голодный —
+/// нет, и жабра превращается из экономии в спасение.
+pub fn suffocation(organism: &OrganismState, env: &Environment) -> f32 {
+    suffocation_with(organism, env, SUFFOCATION_DAMAGE)
+}
+
+/// То же с серверным коэффициентом.
+pub fn suffocation_with(organism: &OrganismState, env: &Environment, rate: f32) -> f32 {
+    let deficit = OXYGEN_COMFORT - env.oxygen - organism.oxygen_affinity;
+    (deficit - SUFFOCATION_SLACK).max(0.0) * rate
+}
+
 /// Урон здоровью в секунду от **местной** отравы: облаков и грязи.
 ///
 /// `local_toxin` — это только то, что добавлено к воде здесь: чужие облака и
@@ -263,6 +283,73 @@ mod tests {
             assert!(
                 (45.0..=260.0).contains(&lifetime),
                 "{season:?}: lifetime {lifetime:.0}s out of range (drain {drain:.3}/s)"
+            );
+        }
+    }
+
+    /// Кислород — единственное давление среды, бьющее по здоровью, и жабра
+    /// должна снимать его целиком, а не экономить копейки. Иначе орган снова
+    /// станет украшением, каким был осморегулятор.
+    #[test]
+    fn one_gill_is_enough_to_stop_choking_in_a_storm() {
+        let storm = env_for(Season::Storm);
+        let bare = OrganismState::default();
+        let choking = suffocation(&bare, &storm);
+        assert!(choking > 0.0, "в шторм голое тело обязано задыхаться");
+        // Не казнь: сытый организм заживает быстрее, чем задыхается.
+        assert!(
+            choking < HEALTH_REGEN,
+            "удушье {choking} сильнее заживления {HEALTH_REGEN}: шторм убьёт всех"
+        );
+
+        let mut genome = Genome::starter();
+        genome.push_part(PartKind::basic(PartFamily::Gill));
+        let adapted = OrganismState::from_genome(genome);
+        assert_eq!(suffocation(&adapted, &storm), 0.0, "жабра не спасла от удушья");
+
+        // В остальных сезонах задыхаться не с чего.
+        for season in [Season::Bloom, Season::Hot, Season::Cold] {
+            assert_eq!(
+                suffocation(&bare, &env_for(season)),
+                0.0,
+                "{season:?}: удушье там, где его быть не должно"
+            );
+        }
+    }
+
+    /// Каждый адаптивный орган обязан окупаться хотя бы в одном сезоне.
+    ///
+    /// Осморегулятор когда-то не окупался ни в одном: солёность гуляла на 0.15
+    /// от середины при терпимости тела 0.16, то есть отклонение никогда не
+    /// выходило за допуск и компенсировать было нечего.
+    #[test]
+    fn every_adaptive_organ_pays_for_itself_somewhere() {
+        let bare = OrganismState::default();
+        for family in [
+            PartFamily::Gill,
+            PartFamily::ThermalMembrane,
+            PartFamily::Osmoregulator,
+            PartFamily::MucusCoat,
+        ] {
+            let mut genome = Genome::starter();
+            genome.push_part(PartKind::basic(family));
+            let adapted = OrganismState::from_genome(genome);
+
+            let best = [Season::Bloom, Season::Hot, Season::Storm, Season::Cold]
+                .into_iter()
+                .map(|season| {
+                    // Худший момент сезона: часть давлений нарастает к концу.
+                    let mut env = env_for(season);
+                    env.time_in_season = env.season_length * 0.9;
+                    env.advance(0.0);
+                    energy_drain(&bare, &env) - energy_drain(&adapted, &env)
+                })
+                .fold(f32::MIN, f32::max);
+
+            assert!(
+                best > 0.0,
+                "{} не окупается ни в одном сезоне (лучший выигрыш {best})",
+                family.name()
             );
         }
     }

@@ -197,6 +197,8 @@ settings! {
     }
 
     "ядовитые облака" {
+        suffocation_damage: f32 = SUFFOCATION_DAMAGE,
+            "Урон здоровью в секунду за нехватку кислорода сверх запаса (0 — выключить)";
         toxin_damage: f32 = TOXIN_DAMAGE,
             "Урон здоровью в секунду за единицу яда сверх стойкости организма";
         toxin_interval: f32 = TOXIN_INTERVAL, "Раз во сколько секунд железа оставляет облако";
@@ -307,6 +309,7 @@ fn sanitize(config: &mut ServerConfig) {
     config.toxin_lifetime = config.toxin_lifetime.max(0.5);
     config.toxin_radius = config.toxin_radius.max(0.5);
     config.toxin_damage = config.toxin_damage.max(0.0);
+    config.suffocation_damage = config.suffocation_damage.max(0.0);
     config.pollution_per_upkeep = config.pollution_per_upkeep.max(0.0);
     config.bot_vision = config.bot_vision.max(1.0);
 }

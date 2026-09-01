@@ -379,6 +379,14 @@ pub fn survival(
             organism.health = (organism.health - poison * dt).max(0.0);
         }
 
+        // Удушье. Заживление оно не блокирует: из отравленного места можно
+        // уплыть, а из шторма нельзя — он накрывает всю арену. Поэтому сытый
+        // переживает, голодный нет, а жабра снимает удушье целиком.
+        let choking = suffocation_with(&organism, &local, config.suffocation_damage);
+        if choking > 0.0 {
+            organism.health = (organism.health - choking * dt).max(0.0);
+        }
+
         if organism.energy <= 0.0 {
             organism.health = (organism.health - config.starvation_damage * dt).max(0.0);
         } else if organism.energy > cap * config.well_fed_fraction
@@ -542,6 +550,7 @@ pub fn divide(
 pub fn deaths(
     mut commands: Commands,
     config: Res<ServerConfig>,
+    env: Res<Environment>,
     mut query: Query<(
         Entity,
         &PlayerPosition,
@@ -573,10 +582,14 @@ pub fn deaths(
             "died: {} | поколение {}, частей {}, масса {:.1}{}",
             if organism.combat_timer > 0.0 {
                 "убит"
-            } else if organism.energy > 0.0 {
-                "отравлен"
-            } else {
+            } else if organism.energy <= 0.0 {
                 "голод"
+            // Причина смерти по состоянию воды вокруг: удушье накрывает всю
+            // арену, поэтому сезонного фона для него достаточно.
+            } else if suffocation_with(organism, &env, config.suffocation_damage) > 0.0 {
+                "задохнулся"
+            } else {
+                "отравлен"
             },
             organism.genome.generation,
             organism.genome.parts.len(),
