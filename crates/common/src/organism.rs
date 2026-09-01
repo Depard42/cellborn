@@ -646,16 +646,34 @@ pub fn slot_direction(index: usize) -> Vec3 {
 
 /// Where a part sits, given how many parts came before it.
 pub fn slot_transform(family: PartFamily, index: usize, body_radius: f32) -> (Vec3, Quat) {
-    let dir = match family {
+    let dir = slot_facing(family, index);
+    let rotation = Quat::from_rotation_arc(Vec3::Y, dir);
+    (dir * body_radius * slot_depth(family), rotation)
+}
+
+/// Куда смотрит слот — без всякого радиуса.
+pub fn slot_facing(family: PartFamily, index: usize) -> Vec3 {
+    match family {
         // The flagellum always trails directly behind, that is what it is for.
         PartFamily::Flagellum => Vec3::new(0.0, 0.0, 1.0),
         // The mouth leads.
         PartFamily::Mouth => Vec3::new(0.0, 0.0, -1.0),
         _ => slot_direction(index),
-    };
-    let depth = if family.is_external() { 0.86 } else { 0.42 };
-    let rotation = Quat::from_rotation_arc(Vec3::Y, dir);
-    (dir * body_radius * depth, rotation)
+    }
+}
+
+/// Насколько глубоко в теле сидит орган, в долях радиуса.
+///
+/// Доля, а не расстояние: тело растёт, и орган обязан расти вместе с ним.
+/// Именно это когда-то и сломалось — позиция части запекалась в геном по
+/// прикидочному радиусу, а тело потом раздувалось от массы, и внешние органы
+/// оказывались внутри пузыря.
+pub fn slot_depth(family: PartFamily) -> f32 {
+    if family.is_external() {
+        0.86
+    } else {
+        0.42
+    }
 }
 
 impl Genome {

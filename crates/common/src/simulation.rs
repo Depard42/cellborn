@@ -112,9 +112,13 @@ pub fn feeding_reach(organism: &OrganismState) -> Option<f32> {
     Some(body_radius(organism.mass) + mouths)
 }
 
-/// Distance at which the client highlights nearby food.
+/// Насколько далеко видит тело вообще без органов чувств.
+pub const BASE_SENSE_RANGE: f32 = 6.0;
+
+/// Distance at which the client highlights nearby food — и, что важнее, на
+/// сколько разгоняется муть вокруг игрока.
 pub fn sense_range(organism: &OrganismState) -> f32 {
-    6.0 + organism.genome.parts.iter().map(|p| stats(p.kind).sense).sum::<f32>()
+    BASE_SENSE_RANGE + organism.genome.parts.iter().map(|p| stats(p.kind).sense).sum::<f32>()
 }
 
 /// Swimming speed in units per second: parts add thrust, mass takes it away.

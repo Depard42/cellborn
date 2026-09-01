@@ -8,6 +8,7 @@ use bevy::prelude::*;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
 use bevy::asset::RenderAssetUsages;
 use cellborn_common::*;
+use lightyear::prelude::Controlled;
 use rand::Rng;
 
 use crate::fx::NotShadowCaster;
@@ -445,6 +446,8 @@ pub fn animate_food(
 pub fn apply_season(
     time: Res<Time>,
     water: Res<WorldUpdate>,
+    // Глаза и хеморецепторы игрока: они разгоняют муть.
+    player: Query<&PlayerGenome, With<Controlled>>,
     mut clear: ResMut<ClearColor>,
     mut ambient: ResMut<GlobalAmbientLight>,
     mut sun: Query<(&mut DirectionalLight, &mut Transform)>,
@@ -468,9 +471,33 @@ pub fn apply_season(
     if let Ok(mut fog) = fog.single_mut() {
         fog.color = mix(fog.color, target.water, k);
         if let FogFalloff::ExponentialSquared { density } = &mut fog.falloff {
-            *density = density.lerp(target.fog_density, k);
+            // Органы чувств буквально дают зрение: чем их больше, тем дальше
+            // видно сквозь муть.
+            //
+            // До этого глаз только раздвигал подсветку ближней еды — а еду и
+            // так видно всю, что помещается на экран, так что орган был
+            // украшением. Туман — то единственное, что реально мешает смотреть,
+            // и особенно в шторм, где его вдвое больше обычного.
+            let clarity = player
+                .single()
+                .map(|genome| sense_range(&OrganismState::from_genome(genome.0.clone())))
+                .unwrap_or(BASE_SENSE_RANGE);
+            let sharpened = target.fog_density * fog_factor(clarity);
+            *density = density.lerp(sharpened, k);
         }
     }
+}
+
+/// Во сколько раз реже становится муть при такой чувствительности.
+///
+/// Голое тело видит на [`BASE_SENSE_RANGE`] и получает множитель 1: мир для
+/// него выглядит ровно так, как задуман сезоном. Дальше зрение улучшается, но
+/// с насыщением — иначе десяток глаз просто отменил бы погоду.
+pub fn fog_factor(sense: f32) -> f32 {
+    let extra = (sense - BASE_SENSE_RANGE).max(0.0);
+    // Половина мути уходит примерно на двадцати единицах сверх базы: это три
+    // глаза или пять хеморецепторов.
+    (1.0 / (1.0 + extra / 20.0)).clamp(0.35, 1.0)
 }
 
 fn mix(a: Color, b: Color, k: f32) -> Color {
@@ -536,18 +563,42 @@ pub fn spawn_cloud_visuals(
 /// as the cloud disperses.
 pub fn animate_clouds(
     time: Res<Time>,
+    player: Query<&PlayerGenome, With<Controlled>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
     clouds: Query<(&ToxinCloud, &Children)>,
     mut cloud_transforms: Query<&mut Transform, (With<CloudVisual>, Without<CloudPuff>)>,
-    mut puffs: Query<(&mut CloudPuff, &mut Transform), Without<CloudVisual>>,
+    mut puffs: Query<
+        (&mut CloudPuff, &mut Transform, &MeshMaterial3d<StandardMaterial>),
+        Without<CloudVisual>,
+    >,
 ) {
     let t = time.elapsed_secs();
     let dt = time.delta_secs();
+
+    // Своя стойкость к яду: чем она выше, тем прозрачнее для тебя чужая дымка.
+    // Облако рисуется настолько густым, насколько оно тебе опасно, — так по
+    // одному взгляду видно, лезть туда или нет.
+    let resistance = player
+        .single()
+        .map(|genome| OrganismState::from_genome(genome.0.clone()).toxin_resistance)
+        .unwrap_or(BASE_TOXIN_RESISTANCE);
+
     for (cloud, children) in &clouds {
+        let menace = ((cloud.strength - resistance) / cloud.strength.max(0.01)).clamp(0.0, 1.0);
         for child in children.iter() {
             if let Ok(mut transform) = cloud_transforms.get_mut(child) {
                 transform.translation = cloud.position;
             }
-            let Ok((mut puff, mut transform)) = puffs.get_mut(child) else { continue };
+            let Ok((mut puff, mut transform, material)) = puffs.get_mut(child) else { continue };
+            // Безобидная для тебя дымка почти не мешает смотреть; смертельная
+            // висит плотной кляксой.
+            if let Some(mut material) = materials.get_mut(material.id()) {
+                let alpha = 0.04 + menace * 0.30;
+                let current = material.base_color.alpha();
+                if (current - alpha).abs() > 0.005 {
+                    material.base_color = material.base_color.with_alpha(alpha);
+                }
+            }
             // Slow internal convection, plus a rise: poison drifts upward.
             let (drift, scale, phase, spin) = (puff.drift, puff.scale, puff.phase, puff.spin);
             puff.offset += drift * dt;

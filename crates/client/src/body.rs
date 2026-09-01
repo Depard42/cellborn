@@ -80,6 +80,21 @@ pub fn relation_color(
     Color::srgb(0.86, 0.72, 0.40)
 }
 
+/// Докуда цитоплазме позволено дрейфовать, в долях радиуса тела.
+///
+/// Органеллы — дети мембраны, то есть живут в единичной сфере. Их орбита плюс
+/// дрейф доходили почти до единицы, а с собственным размером шарика и вовсе
+/// выходили за неё — и внутренности вылезали сквозь оболочку наружу. Тем
+/// заметнее, чем сильнее тело сплющивалось при столкновении.
+const CYTOPLASM_REACH: f32 = 0.55;
+
+/// На какой глубине ползает паразит.
+///
+/// У самой стенки, а не в середине: в центре он терялся среди органелл, стоило
+/// отрастить их побольше, а по внутренней стенке он читается силуэтом на фоне
+/// мембраны — и сразу видно, что этой клеткой управляет человек.
+const PARASITE_REACH: f32 = 0.74;
+
 /// The deformable core. Parts hang off it, so they squash with the body.
 #[derive(Component)]
 pub struct Membrane;
@@ -371,13 +386,20 @@ pub fn build_bodies(
             commands.entity(entity).add_child(bar);
         }
 
-        for part in genome.0.parts.iter() {
+        for (index, part) in genome.0.parts.iter().enumerate() {
             if part.kind.family == PartFamily::Membrane {
                 continue;
             }
-            // Positions are stored in the genome in body-radius units; the membrane
-            // child is already scaled by the radius, so they are used as-is here.
-            let base = part.position / radius.max(0.001);
+            // Мембрана — единичная сфера, растянутая настоящим радиусом тела,
+            // поэтому части кладутся в долях от неё, а радиус здесь не нужен
+            // вовсе.
+            //
+            // Раньше сюда шла запечённая в геном позиция, поделённая на радиус.
+            // Но запекалась она по прикидочному радиусу (`push_part` не знает
+            // массы, которая от неё же и зависит), и чем больше вырастало тело,
+            // тем сильнее прикидка отставала: внешние органы уползали внутрь
+            // пузыря и пропадали из виду.
+            let base = slot_facing(part.kind.family, index) * slot_depth(part.kind.family);
             spawn_part(
                 &mut commands,
                 &mut meshes,
@@ -762,22 +784,21 @@ pub fn animate_bodies(
                     // Паразит медленно ползает внутри и извивается.
                     let t = body.phase * 0.5 + parasite.phase;
                     inner.translation = Vec3::new(
-                        0.18 + t.sin() * 0.22,
-                        (t * 0.7).cos() * 0.16,
-                        -0.12 + (t * 1.3).sin() * 0.20,
-                    );
-                    inner.rotation = Quat::from_rotation_y(t * 0.6)
-                        * Quat::from_rotation_x((t * 1.7).sin() * 0.35);
+                        t.sin(),
+                        (t * 0.43).sin() * 0.5,
+                        t.cos(),
+                    )
+                    .normalize_or(Vec3::Z)
+                        * PARASITE_REACH;
+                    // Смотрит по ходу движения вдоль стенки, а не в случайную
+                    // сторону: так он читается как ползущее существо.
+                    inner.rotation = Quat::from_rotation_y(-t)
+                        * Quat::from_rotation_x((t * 1.7).sin() * 0.25);
                     continue;
                 }
                 if let Ok((organelle, mut inner)) = organelles.get_mut(part_root) {
                     let t = body.phase * organelle.speed;
-                    inner.translation = organelle.orbit
-                        + Vec3::new(
-                            (t + organelle.phase).sin() * 0.16,
-                            (t * 0.8 + organelle.phase).cos() * 0.12,
-                            (t * 1.2 + organelle.phase).sin() * 0.16,
-                        );
+                    inner.translation = drift(organelle, t);
                     continue;
                 }
                 let Ok(sub) = children.get(part_root) else { continue; };
@@ -798,12 +819,7 @@ pub fn animate_bodies(
                     } else if let Ok((organelle, mut inner)) = organelles.get_mut(leaf) {
                         // Slow, uneven drift inside the cytoplasm.
                         let t = body.phase * organelle.speed;
-                        inner.translation = organelle.orbit
-                            + Vec3::new(
-                                (t + organelle.phase).sin() * 0.16,
-                                (t * 0.8 + organelle.phase).cos() * 0.12,
-                                (t * 1.2 + organelle.phase).sin() * 0.16,
-                            );
+                        inner.translation = drift(organelle, t);
                     } else if let Ok(mut mouth) = mouths.get_mut(leaf) {
                         // Opens on a bite, idles with a slow chew.
                         let open = 1.0 + body.eat_timer * 1.6 + (body.phase * 0.8).sin() * 0.06;
@@ -813,6 +829,20 @@ pub fn animate_bodies(
             }
         }
     }
+}
+
+/// Медленный неровный дрейф органеллы — но не дальше [`CYTOPLASM_REACH`].
+///
+/// Предел обязателен: орбита и дрейф складывались почти до самой оболочки, и
+/// внутренности вылезали наружу.
+fn drift(organelle: &Organelle, t: f32) -> Vec3 {
+    let wander = organelle.orbit
+        + Vec3::new(
+            (t + organelle.phase).sin() * 0.16,
+            (t * 0.8 + organelle.phase).cos() * 0.12,
+            (t * 1.2 + organelle.phase).sin() * 0.16,
+        );
+    wander.clamp_length_max(CYTOPLASM_REACH)
 }
 
 /// Keeps health bars facing the camera and sized to the health they show.
@@ -867,6 +897,48 @@ mod tests {
             genome.push_part(PartKind::basic(PartFamily::Spike));
         }
         genome
+    }
+
+    /// Внутренности обязаны оставаться внутри при любой фазе дрейфа.
+    ///
+    /// Органеллы — дети мембраны, то есть живут в единичной сфере: всё, что
+    /// дальше единицы, торчит наружу сквозь оболочку.
+    #[test]
+    fn organelles_never_poke_through_the_membrane() {
+        for i in 0..6 {
+            let a = i as f32 * 1.7;
+            let organelle = Organelle {
+                orbit: Vec3::new(a.sin() * 0.45, (a * 0.7).cos() * 0.35, a.cos() * 0.45),
+                speed: 0.25 + (i as f32 % 3.0) * 0.12,
+                phase: a,
+            };
+            // Крупнейший шарик цитоплазмы; он тоже должен помещаться.
+            let ball = 0.10 + 2.0 * 0.05;
+            for step in 0..400 {
+                let t = step as f32 * 0.17;
+                let far = drift(&organelle, t).length() + ball;
+                assert!(far < 1.0, "органелла вылезла наружу: {far}");
+            }
+        }
+    }
+
+    /// Внешние органы сидят на поверхности, внутренние — внутри, и это доли
+    /// радиуса, а не расстояния: тело растёт, органы растут вместе с ним.
+    #[test]
+    fn parts_sit_at_fractions_of_the_body_not_at_baked_distances() {
+        for family in PartFamily::ALL {
+            let depth = slot_depth(family);
+            let place = slot_facing(family, 3) * depth;
+            assert!((place.length() - depth).abs() < 1e-4, "{} сместился", family.name());
+            if family.is_external() {
+                assert!(depth > 0.7, "{} должен быть на виду", family.name());
+            } else {
+                assert!(depth < 0.6, "{} должен быть внутри", family.name());
+            }
+            // Паразит ползает глубже внешних органов и дальше цитоплазмы —
+            // иначе он снова потеряется среди органелл.
+            assert!(PARASITE_REACH > CYTOPLASM_REACH);
+        }
     }
 
     /// Цвет обязан отвечать на вопрос «ударит ли оно меня», а не «одной ли мы
