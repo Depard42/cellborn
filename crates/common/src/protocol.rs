@@ -80,6 +80,13 @@ pub struct WorldUpdate {
     pub oxygen: f32,
     /// Локальный уровень: сезонный фон плюс облака, в которых стоит организм.
     pub toxin: f32,
+    /// Пороги вражды, по которым судит **этот** сервер.
+    ///
+    /// Едут клиенту, потому что иначе интерфейс врёт. Раньше клиент красил тела
+    /// по вшитым в себя числам, а дрался сервер по своим из конфига: стоило
+    /// администратору поменять порог, и зелёная «родня» начинала наносить урон.
+    pub aggression_threshold: u32,
+    pub kin_split_threshold: u32,
 }
 
 impl Default for WorldUpdate {
@@ -90,6 +97,8 @@ impl Default for WorldUpdate {
             salinity: 0.5,
             oxygen: 0.8,
             toxin: 0.05,
+            aggression_threshold: crate::AGGRESSION_THRESHOLD,
+            kin_split_threshold: crate::KIN_SPLIT_THRESHOLD,
         }
     }
 }

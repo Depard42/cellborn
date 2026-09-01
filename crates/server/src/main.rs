@@ -449,6 +449,7 @@ const STATS_INTERVAL: f32 = 0.5;
 #[allow(clippy::too_many_arguments)]
 fn broadcast_state(
     time: Res<Time>,
+    config: Res<ServerConfig>,
     env: Res<Environment>,
     clock: Res<TickClock>,
     grid: Res<FoodGrid>,
@@ -509,6 +510,8 @@ fn broadcast_state(
                 salinity: env.salinity,
                 oxygen: env.oxygen,
                 toxin: env.toxin_level + local_toxin,
+                aggression_threshold: config.aggression_threshold,
+                kin_split_threshold: config.kin_split_threshold,
             });
         }
         if let Some(stats) = stats {

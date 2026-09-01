@@ -44,18 +44,40 @@ pub struct Organelle {
 }
 
 /// How another organism relates to the one we control.
-pub fn relation_color(mine: Option<&Genome>, theirs: &Genome, controlled: bool) -> Color {
+///
+/// Цвет обязан отвечать на один вопрос: ударит ли это тело меня при касании.
+/// Поэтому вражда проверяется **первой**, и только потом родство.
+///
+/// Раньше было наоборот, и это врало. Сородич красился зелёным «своя семья» до
+/// того, как проверялась вражда, — а родня дерётся, разойдясь больше чем на
+/// `kin_split_threshold` органов: род раскалывается, это правило игры, а не
+/// исключение. Ветка с Мутатором расходится быстрее прочих и первой начинала
+/// бить «своих», оставаясь при этом зелёной.
+///
+/// Пороги приходят от сервера: он судит по своему конфигу, и вшитые в клиент
+/// числа были второй причиной, по которой цвет мог не совпасть с уроном.
+pub fn relation_color(
+    mine: Option<&Genome>,
+    theirs: &Genome,
+    controlled: bool,
+    water: &WorldUpdate,
+) -> Color {
     if controlled {
         return Color::srgb(0.46, 0.88, 0.74);
     }
-    match mine {
-        // Same line: family, never hostile.
-        Some(m) if m.lineage == theirs.lineage => Color::srgb(0.55, 0.85, 0.55),
-        // Different enough to be prey — or predator.
-        Some(m) if hostile(m, theirs) => Color::srgb(0.92, 0.38, 0.32),
-        // A stranger, but too similar to fight.
-        _ => Color::srgb(0.86, 0.72, 0.40),
+    let Some(m) = mine else {
+        return Color::srgb(0.86, 0.72, 0.40);
+    };
+    if hostile_with(m, theirs, water.aggression_threshold, water.kin_split_threshold) {
+        // Ударит при касании — неважно, родня это или чужак.
+        return Color::srgb(0.92, 0.38, 0.32);
     }
+    if m.lineage == theirs.lineage {
+        // Своя колония: пока не разошлись — безопасна.
+        return Color::srgb(0.55, 0.85, 0.55);
+    }
+    // Чужак, но слишком похож, чтобы драться.
+    Color::srgb(0.86, 0.72, 0.40)
 }
 
 /// The deformable core. Parts hang off it, so they squash with the body.
@@ -162,6 +184,7 @@ pub fn build_bodies(
         Or<(Without<Body>, Changed<PlayerGenome>)>,
     >,
     mine: Query<&PlayerGenome, With<Controlled>>,
+    water: Res<WorldUpdate>,
     children: Query<&Children>,
 ) {
     for (entity, genome, vitals, position, controlled, is_player, body) in &organisms {
@@ -178,7 +201,7 @@ pub fn build_bodies(
         }
 
         let radius = body_radius(vitals.mass);
-        let tint = relation_color(mine.iter().next().map(|g| &g.0), &genome.0, controlled);
+        let tint = relation_color(mine.iter().next().map(|g| &g.0), &genome.0, controlled, &water);
 
         let membrane_material = materials.add(StandardMaterial {
             base_color: tint.with_alpha(0.62),
@@ -566,12 +589,13 @@ pub fn deform_on_contact(
 /// Keeps the membrane colour honest about kinship: family, stranger, or enemy.
 pub fn recolor_bodies(
     mut materials: ResMut<Assets<StandardMaterial>>,
+    water: Res<WorldUpdate>,
     mine: Query<&PlayerGenome, With<Controlled>>,
     bodies: Query<(&Body, &PlayerGenome, Has<Controlled>)>,
 ) {
     let mine = mine.iter().next().map(|g| &g.0);
     for (body, genome, controlled) in &bodies {
-        let tint = relation_color(mine, &genome.0, controlled);
+        let tint = relation_color(mine, &genome.0, controlled, &water);
         let Some(mut material) = materials.get_mut(body.material.id()) else { continue; };
         if material.base_color != tint.with_alpha(0.62) {
             material.base_color = tint.with_alpha(0.62);
@@ -826,5 +850,82 @@ pub fn update_health_bars(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RED: Color = Color::srgb(0.92, 0.38, 0.32);
+    const GREEN: Color = Color::srgb(0.55, 0.85, 0.55);
+    const SAND: Color = Color::srgb(0.86, 0.72, 0.40);
+
+    fn grown(lineage: u64, extra: usize) -> Genome {
+        let mut genome = Genome::starter_of(lineage);
+        for _ in 0..extra {
+            genome.push_part(PartKind::basic(PartFamily::Spike));
+        }
+        genome
+    }
+
+    /// Цвет обязан отвечать на вопрос «ударит ли оно меня», а не «одной ли мы
+    /// фамилии».
+    ///
+    /// Здесь жил баг: родство проверялось раньше вражды, поэтому разошедшаяся
+    /// ветвь рода красилась зелёным «своя семья», продолжая наносить урон.
+    /// Ветка с Мутатором расходится быстрее прочих и упиралась в это первой.
+    #[test]
+    fn a_split_branch_is_red_even_though_it_is_kin() {
+        let water = WorldUpdate::default();
+        let mine = grown(7, 0);
+
+        // Родня, разошедшаяся дальше порога раскола, — уже враг.
+        let split = grown(7, (water.kin_split_threshold + 1) as usize);
+        assert!(
+            hostile_with(&mine, &split, water.aggression_threshold, water.kin_split_threshold),
+            "предпосылка теста неверна: сервер такую пару врагами не считает"
+        );
+        assert_eq!(
+            relation_color(Some(&mine), &split, false, &water),
+            RED,
+            "разошедшаяся ветвь рода покрашена как безопасная"
+        );
+    }
+
+    /// Близкая родня остаётся зелёной, иначе лечение хуже болезни.
+    #[test]
+    fn close_kin_stay_green() {
+        let water = WorldUpdate::default();
+        let mine = grown(7, 0);
+        let child = grown(7, 2);
+        assert_eq!(relation_color(Some(&mine), &child, false, &water), GREEN);
+    }
+
+    /// Чужак, слишком похожий для драки, — песочный; разошедшийся — красный.
+    #[test]
+    fn strangers_are_coloured_by_whether_they_will_fight() {
+        let water = WorldUpdate::default();
+        let mine = grown(7, 0);
+
+        let similar = grown(9, 1);
+        assert_eq!(relation_color(Some(&mine), &similar, false, &water), SAND);
+
+        let different = grown(9, (water.aggression_threshold + 1) as usize);
+        assert_eq!(relation_color(Some(&mine), &different, false, &water), RED);
+    }
+
+    /// Пороги приходят от сервера: с другими настройками цвет обязан меняться,
+    /// иначе интерфейс снова начнёт врать про чужой конфиг.
+    #[test]
+    fn colours_follow_the_servers_thresholds() {
+        let mine = grown(7, 0);
+        let stranger = grown(9, 5);
+
+        let lenient = WorldUpdate { aggression_threshold: 20, ..Default::default() };
+        assert_eq!(relation_color(Some(&mine), &stranger, false, &lenient), SAND);
+
+        let harsh = WorldUpdate { aggression_threshold: 2, ..Default::default() };
+        assert_eq!(relation_color(Some(&mine), &stranger, false, &harsh), RED);
     }
 }
