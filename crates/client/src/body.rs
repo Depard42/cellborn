@@ -382,7 +382,24 @@ pub fn build_bodies(
                     NotShadowCaster,
                 ))
                 .id();
-            commands.entity(bar).add_children(&[back, fill]);
+            // Герб рода слева от полоски: маленький, но по нему видно, кто
+            // чей, не сравнивая себя с каждым встречным по цвету.
+            let crest = crate::crest::Crest::of(genome.0.lineage);
+            let mark = commands
+                .spawn((
+                    crate::crest::CrestMark,
+                    Transform::from_xyz(-1.18, 0.0, 0.0).with_scale(Vec3::splat(0.30)),
+                    Mesh3d(crate::crest::crest_mesh(genome.0.lineage, &mut meshes)),
+                    MeshMaterial3d(materials.add(StandardMaterial {
+                        base_color: crest.color,
+                        emissive: LinearRgba::from(crest.color) * 0.8,
+                        unlit: true,
+                        ..default()
+                    })),
+                    NotShadowCaster,
+                ))
+                .id();
+            commands.entity(bar).add_children(&[back, fill, mark]);
             commands.entity(entity).add_child(bar);
         }
 
@@ -576,8 +593,11 @@ pub fn deform_on_contact(
 
     for (entity, mut body, position, vitals, transform) in &mut bodies {
         let radius = body_radius(vitals.mass);
-        let mut deepest = 0.0;
-        let mut direction = Vec3::X;
+        let mut deepest = 0.0f32;
+        // Направление вмятины складывается из всех касаний, а не берётся у
+        // самого глубокого. Зажатая между двумя соседями клетка должна
+        // выдавливаться вбок, а не выбирать, об кого ей плющиться.
+        let mut pressure = Vec3::ZERO;
 
         for (other, other_position, other_radius) in &neighbours {
             if *other == entity {
@@ -590,20 +610,23 @@ pub fn deform_on_contact(
                 continue;
             }
             let depth = (contact - distance) / contact;
-            if depth > deepest {
-                deepest = depth;
-                // The dent is stored in the body's own axes, so it stays on the
-                // side that is actually being pressed while the cell turns.
-                direction = transform.rotation.inverse() * (offset / distance);
-            }
+            deepest = deepest.max(depth);
+            // The dent is stored in the body's own axes, so it stays on the
+            // side that is actually being pressed while the cell turns.
+            pressure += transform.rotation.inverse() * (offset / distance) * depth;
         }
 
         // Клетки мягкие: вмятина набирается быстро и распускается медленнее,
         // как настоящая мембрана.
         let speed = if deepest > body.dent_depth { 14.0 } else { 5.0 };
         body.dent_depth = body.dent_depth.lerp(deepest.min(0.9), (dt * speed).min(1.0));
-        if deepest > 0.0 {
-            body.dent = direction;
+        if pressure != Vec3::ZERO {
+            // Направление тоже догоняет, а не переключается рывком: без этого
+            // тело дёргается, когда сосед проскальзывает вдоль бока.
+            body.dent = body
+                .dent
+                .lerp(pressure.normalize_or(body.dent), (dt * 9.0).min(1.0))
+                .normalize_or(body.dent);
         }
     }
 }
@@ -755,13 +778,19 @@ pub fn animate_bodies(
         // Squash and stretch along the direction of travel.
         let stretch = 1.0 + (body.speed * 0.075).min(0.55) + body.eat_timer * 0.35;
         let squeeze = 1.0 / stretch.sqrt();
-        // A neighbour pressing on us flattens that side and bulges the others.
+        // Тело не просто сжимается о соседа, оно его обтекает.
+        //
+        // Раньше вмятина была чистым сжатием: клетка становилась плоской с
+        // одного бока и всё. Живое так себя не ведёт — вытесненный объём должен
+        // куда-то деться, и уходит он вдоль поверхности, которая давит.
+        // Поэтому вдавленная ось сплющивается, а **перпендикулярные ей**
+        // раздуваются, и тем сильнее, чем глубже вмятина.
         let dent = body.dent_depth;
         let squeeze_axis = body.dent.abs().normalize_or(Vec3::X);
-        // Вдавленная ось сплющивается сильно, остальные заметно раздуваются:
-        // объём как будто перетекает в стороны.
-        let dent_scale =
-            Vec3::ONE - squeeze_axis * dent * 1.05 + Vec3::splat(dent * 0.42);
+        // Единица минус ось — это и есть «всё, что не вдавлено»: туда и
+        // перетекает объём.
+        let flow = Vec3::ONE - squeeze_axis;
+        let dent_scale = Vec3::ONE - squeeze_axis * dent * 1.15 + flow * dent * 0.66;
 
         // While splitting the cell pinches in the middle and swells along its axis.
         let split = body.split_timer;

@@ -1,6 +1,8 @@
 mod ai;
 mod config;
+mod discovery;
 mod grid;
+mod hazards;
 mod life;
 mod metrics;
 
@@ -61,6 +63,7 @@ impl Plugin for ServerGamePlugin {
         app.init_resource::<TickClock>();
         app.init_resource::<PollutionField>();
         app.insert_resource(SeasonWatch(Season::Bloom));
+        app.insert_resource(discovery::open(app.world().resource::<ServerConfig>()));
         app.add_systems(Startup, start_server);
         // Порядок несущий: движение → расталкивание → еда → бой. Тело сначала
         // оказывается там, где оказалось, потом перестаёт занимать чужую воду,
@@ -99,7 +102,18 @@ impl Plugin for ServerGamePlugin {
                 )
                     .chain(),
                 // Кто родился, кто умер, чем зарос мир.
-                (life::divide, life::deaths, life::respawn, spawn_food, ai::maintain_wild).chain(),
+                (
+                    hazards::thorn_damage,
+                    hazards::summon_leviathan,
+                    hazards::leviathan_pass,
+                    hazards::maintain_feasts,
+                    life::divide,
+                    life::deaths,
+                    life::respawn,
+                    spawn_food,
+                    ai::maintain_wild,
+                )
+                    .chain(),
                 // Что об этом узнают наружу.
                 (
                     census_log,
@@ -112,7 +126,7 @@ impl Plugin for ServerGamePlugin {
             )
                 .chain(),
         );
-        app.add_systems(Update, handle_mutation_requests);
+        app.add_systems(Update, (handle_mutation_requests, discovery::answer_probes));
         app.add_observer(on_new_client);
         app.add_observer(on_connected);
     }
@@ -142,6 +156,10 @@ fn start_server(mut commands: Commands, config: Res<ServerConfig>) {
         ))
         .id();
     commands.trigger(Start { entity: server });
+
+    // Колючки ставятся один раз и стоят вечно: укрытие бесполезно, если его
+    // нельзя запомнить.
+    hazards::place_thorns(&mut commands, config.thorn_count);
 
     // Карта загрязнения — одна на мир, поэтому и сущность у неё одна. Компонент
     // на каждом организме означал бы семьдесят копий одного и того же.
@@ -282,6 +300,7 @@ fn spawn_food(
     env: Res<Environment>,
     time: Res<Time>,
     grid: Res<FoodGrid>,
+    feasts: Query<&Feast>,
     mut budget: Local<f32>,
 ) {
     // Сколько еды в воде, сетка уже знает: она пересобрана в начале тика.
@@ -293,6 +312,7 @@ fn spawn_food(
     }
     *budget += config.food_spawn_rate * time.delta_secs();
     let mut rng = rand::rng();
+    let spots: Vec<Feast> = feasts.iter().copied().collect();
     let weights: Vec<(FoodKind, f32)> = [FoodKind::Plankton, FoodKind::Algae, FoodKind::Detritus]
         .into_iter()
         .map(|k| (k, k.weight(env.season)))
@@ -311,11 +331,8 @@ fn spawn_food(
             roll -= w;
         }
         // Cluster food instead of spreading it evenly: clusters are worth swimming to.
-        let cluster = Vec3::new(
-            rng.random_range(-ARENA_HALF_EXTENT..ARENA_HALF_EXTENT),
-            0.0,
-            rng.random_range(-ARENA_HALF_EXTENT..ARENA_HALF_EXTENT),
-        );
+        // Большая часть достаётся лакомым местам — ради них они и существуют.
+        let cluster = hazards::feeding_spot(&spots, &mut rng);
         let jitter = Vec3::new(
             rng.random_range(-2.5..2.5),
             rng.random_range(-0.4..0.9),

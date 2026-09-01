@@ -46,7 +46,14 @@ pub const ASSET: &str = if cfg!(target_os = "windows") {
 ///
 /// Сравнение по имени файла, без учёта регистра: на Windows игрок вполне может
 /// сохранить конфиг как `Cellborn-Server.CFG`.
-const KEEP: &[&str] = &["cellborn-server.cfg"];
+const KEEP: &[&str] = &[
+    // Настройки мира: игрок их правил, обновление игры их не касается.
+    "cellborn-server.cfg",
+    // Громкость и запомненные серверы. Без этой строки каждое обновление
+    // сбрасывало бы звук и стирало список серверов, к которым игрок ходит
+    // годами.
+    "cellborn.cfg",
+];
 
 /// Что известно про доступный релиз.
 #[derive(Clone, Debug, PartialEq)]
@@ -427,7 +434,13 @@ mod tests {
     /// Конфиг игрока — единственное, ради чего этот список существует.
     #[test]
     fn the_players_config_is_protected_whatever_its_case() {
-        for name in ["cellborn-server.cfg", "Cellborn-Server.CFG", "CELLBORN-SERVER.cfg"] {
+        for name in [
+            "cellborn-server.cfg",
+            "Cellborn-Server.CFG",
+            "CELLBORN-SERVER.cfg",
+            "cellborn.cfg",
+            "Cellborn.CFG",
+        ] {
             assert!(
                 KEEP.iter().any(|keep| keep.eq_ignore_ascii_case(name)),
                 "{name} перезаписался бы обновлением"

@@ -17,7 +17,12 @@ case "$MODE" in
         exec cargo run --release -p cellborn-client -- "$@"
         ;;
     play)
-        cargo build --release -p cellborn-server -p cellborn-client
+        # Собираем, только если бинарники устарели или их нет. Пересборка Bevy
+        # занимает десятки минут, и запускать её ради «просто поиграть» не нужно.
+        if [ ! -x target/release/cellborn-client ] || [ ! -x target/release/cellborn-server ]; then
+            echo "Бинарников нет, собираю (первый раз это долго)..."
+            cargo build --release -p cellborn-server -p cellborn-client
+        fi
         ./target/release/cellborn-server &
         SERVER=$!
         # Что бы ни случилось с клиентом, сервер за собой убираем.
@@ -25,8 +30,13 @@ case "$MODE" in
         sleep 1
         ./target/release/cellborn-client
         ;;
+    build)
+        cargo build --release -p cellborn-server -p cellborn-client
+        echo "Готово:"
+        ls -la target/release/cellborn-server target/release/cellborn-client
+        ;;
     *)
-        echo "Использование: $0 [play|server|client [адрес:порт]]"
+        echo "Использование: $0 [play|build|server|client [адрес:порт]]"
         exit 1
         ;;
 esac

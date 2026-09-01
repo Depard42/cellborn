@@ -565,8 +565,7 @@ pub fn animate_clouds(
     time: Res<Time>,
     player: Query<&PlayerGenome, With<Controlled>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    clouds: Query<(&ToxinCloud, &Children)>,
-    mut cloud_transforms: Query<&mut Transform, (With<CloudVisual>, Without<CloudPuff>)>,
+    mut clouds: Query<(&ToxinCloud, &Children, &mut Transform), With<CloudVisual>>,
     mut puffs: Query<
         (&mut CloudPuff, &mut Transform, &MeshMaterial3d<StandardMaterial>),
         Without<CloudVisual>,
@@ -583,17 +582,22 @@ pub fn animate_clouds(
         .map(|genome| OrganismState::from_genome(genome.0.clone()).toxin_resistance)
         .unwrap_or(BASE_TOXIN_RESISTANCE);
 
-    for (cloud, children) in &clouds {
+    for (cloud, children, mut root) in &mut clouds {
+        // Само облако стоит там, где его оставили. Раньше эта строка пыталась
+        // найти CloudVisual среди детей, но он висит на самой сущности облака,
+        // и позиция не обновлялась вовсе.
+        root.translation = cloud.position;
+
         let menace = ((cloud.strength - resistance) / cloud.strength.max(0.01)).clamp(0.0, 1.0);
         for child in children.iter() {
-            if let Ok(mut transform) = cloud_transforms.get_mut(child) {
-                transform.translation = cloud.position;
-            }
             let Ok((mut puff, mut transform, material)) = puffs.get_mut(child) else { continue };
             // Безобидная для тебя дымка почти не мешает смотреть; смертельная
             // висит плотной кляксой.
             if let Some(mut material) = materials.get_mut(material.id()) {
-                let alpha = 0.04 + menace * 0.30;
+                // Даже безобидная для тебя дымка остаётся видимой: свой
+                // собственный след надо видеть, иначе непонятно, работает ли
+                // железа вообще.
+                let alpha = 0.10 + menace * 0.26;
                 let current = material.base_color.alpha();
                 if (current - alpha).abs() > 0.005 {
                     material.base_color = material.base_color.with_alpha(alpha);
@@ -606,7 +610,14 @@ pub fn animate_clouds(
                 puff.offset = -puff.offset * 0.8;
             }
             let breathe = 1.0 + (t * 0.7 + phase).sin() * 0.18;
-            transform.translation = cloud.position + puff.offset * cloud.radius;
+            // Смещение внутри облака, а не координата в мире: клуб — ребёнок
+            // облака, и его позиция считается от родителя.
+            //
+            // Здесь жил баг, из-за которого облака оказывались вдвое дальше от
+            // центра карты, чем должны: к позиции родителя прибавлялась она же.
+            // У нуля это незаметно, а на краю арены облако уезжало за горизонт —
+            // и собственный ядовитый след игрок не видел никогда.
+            transform.translation = puff.offset * cloud.radius;
             // Клубы не шары: слегка сплюснуты и вытянуты по-разному, иначе
             // облако читается как гроздь пузырей.
             transform.scale = Vec3::new(

@@ -22,6 +22,22 @@ pub const PROTOCOL_ID: u64 = 0x0C_E1_1B_02;
 /// hand out connect tokens from a backend instead.
 pub const PRIVATE_KEY: [u8; 32] = [0; 32];
 
+/// Порт, на котором сервер отзывается на поиск в локальной сети.
+///
+/// Отдельный от игрового намеренно. Игровой порт занят netcode-протоколом
+/// lightyear, и подмешивать в него свои пакеты — верный способ однажды сломать
+/// рукопожатие ради удобства меню.
+pub const DISCOVERY_PORT: u16 = SERVER_PORT + 1;
+
+/// Что клиент кричит в сеть, разыскивая сервер.
+pub const DISCOVERY_PROBE: &[u8] = b"CELLBORN?1";
+
+/// Чем сервер отзывается. Дальше идёт его имя и число игроков.
+pub const DISCOVERY_REPLY: &[u8] = b"CELLBORN!1";
+
+/// Сколько секунд найденный сервер считается живым, если перестал отвечать.
+pub const DISCOVERY_TIMEOUT: f32 = 6.0;
+
 pub fn tick_duration() -> Duration {
     Duration::from_secs_f64(1.0 / FIXED_TIMESTEP_HZ)
 }

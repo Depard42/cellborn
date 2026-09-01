@@ -6,7 +6,10 @@ license.workspace = true
 
 [dependencies]
 # Клиенту нужен весь движок: он и есть тот, ради кого набор по умолчанию собран.
-bevy = { workspace = true, features = ["default"] }
+# `wav` сверх набора по умолчанию: звуки в игре не файлы, а сгенерированные
+# сэмплы, и WAV — единственный формат, который можно собрать в памяти
+# несколькими строками, без кодировщика.
+bevy = { workspace = true, features = ["default", "wav"] }
 serde.workspace = true
 rand.workspace = true
 tracing.workspace = true

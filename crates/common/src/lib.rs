@@ -1,6 +1,7 @@
 pub mod balance;
 pub mod environment;
 pub mod food;
+pub mod hazards;
 pub mod network;
 pub mod organism;
 pub mod pollution;
@@ -11,6 +12,7 @@ pub mod version;
 pub use balance::*;
 pub use environment::*;
 pub use food::*;
+pub use hazards::*;
 pub use network::*;
 pub use organism::*;
 pub use pollution::*;

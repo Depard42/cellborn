@@ -26,6 +26,8 @@ pub enum Screen {
     #[default]
     Menu,
     Wiki,
+    /// Выбор сервера: найденные в сети и запомненные.
+    Servers,
     Game,
 }
 
@@ -42,6 +44,33 @@ pub enum MenuButton {
     Update,
     Quit,
 }
+
+/// Кнопки громкости в меню. Три полосы, у каждой тише и громче.
+#[derive(Component, Clone, Copy, PartialEq)]
+pub enum VolumeButton {
+    Master(i8),
+    Music(i8),
+    Effects(i8),
+}
+
+/// Строка, показывающая текущую громкость.
+#[derive(Component)]
+pub struct VolumeLine;
+
+/// Корень экрана выбора сервера.
+#[derive(Component)]
+pub struct ServersRoot;
+
+/// Кнопка одного сервера в списке.
+#[derive(Component, Clone)]
+pub struct ServerButton {
+    pub address: String,
+    pub name: String,
+}
+
+/// Строка со списком: перерисовывается, пока идёт поиск.
+#[derive(Component)]
+pub struct ServerList;
 
 /// Подпись под кнопкой обновления: что сейчас происходит.
 #[derive(Component)]
@@ -131,6 +160,43 @@ pub fn setup_menu(mut commands: Commands, font: Res<UiFont>) {
                 ));
             }
 
+            // Громкость: три полосы с кнопками тише и громче. Настройка живёт
+            // в файле рядом с игрой и переживает обновление.
+            root.spawn((VolumeLine, text(font, 12.0, DIM, "громкость")));
+            root.spawn(Node {
+                column_gap: Val::Px(4.0),
+                align_items: AlignItems::Center,
+                ..default()
+            })
+            .with_children(|row| {
+                for (button, label) in [
+                    (VolumeButton::Master(-1), "общая −"),
+                    (VolumeButton::Master(1), "+"),
+                    (VolumeButton::Music(-1), "музыка −"),
+                    (VolumeButton::Music(1), "+"),
+                    (VolumeButton::Effects(-1), "звуки −"),
+                    (VolumeButton::Effects(1), "+"),
+                ] {
+                    row.spawn((
+                        button,
+                        Button,
+                        Node {
+                            padding: UiRect::axes(Val::Px(7.0), Val::Px(3.0)),
+                            border_radius: BorderRadius::all(Val::Px(4.0)),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.06)),
+                        Text::new(label),
+                        TextFont {
+                            font: FontSource::Handle(font.clone()),
+                            font_size: FontSize::Px(11.0),
+                            ..default()
+                        },
+                        TextColor(INK),
+                    ));
+                }
+            });
+
             // Строка состояния обновления. Пустой она не бывает: пока ничего
             // не происходит, здесь просто написано, какая версия установлена.
             root.spawn((UpdateStatus, text(font, 11.0, DIM, &version::full())));
@@ -173,6 +239,193 @@ pub fn update_menu_status(
         if text.0 != line {
             text.0 = line;
         }
+    }
+}
+
+/// Кнопки громкости двигают настройку на десятую долю за нажатие.
+pub fn volume_input(
+    buttons: Query<(&Interaction, &VolumeButton), Changed<Interaction>>,
+    mut settings: ResMut<crate::settings::Settings>,
+    mut line: Query<&mut Text, With<VolumeLine>>,
+) {
+    for (interaction, button) in &buttons {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        // Шаг в десятую: мельче никто не различает на слух, крупнее — грубо.
+        let step = 0.1;
+        match button {
+            VolumeButton::Master(dir) => {
+                settings.volume = (settings.volume + step * *dir as f32).clamp(0.0, 1.0)
+            }
+            VolumeButton::Music(dir) => {
+                settings.music = (settings.music + step * *dir as f32).clamp(0.0, 1.0)
+            }
+            VolumeButton::Effects(dir) => {
+                settings.effects = (settings.effects + step * *dir as f32).clamp(0.0, 1.0)
+            }
+        }
+    }
+
+    if let Ok(mut text) = line.single_mut() {
+        let value = format!(
+            "громкость: общая {:.0}%   музыка {:.0}%   звуки {:.0}%",
+            settings.volume * 100.0,
+            settings.music * 100.0,
+            settings.effects * 100.0,
+        );
+        if text.0 != value {
+            text.0 = value;
+        }
+    }
+}
+
+/// Экран выбора сервера: найденные в сети сверху, запомненные снизу.
+pub fn setup_servers(
+    mut commands: Commands,
+    font: Res<UiFont>,
+    mut discovery: ResMut<crate::discovery::Discovery>,
+) {
+    // Список начинается с чистого листа: иначе игрок увидит серверы,
+    // выключенные полчаса назад.
+    discovery.reset();
+    let font = &font.0;
+    commands
+        .spawn((
+            ServersRoot,
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                row_gap: Val::Px(8.0),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.01, 0.05, 0.06, 0.92)),
+        ))
+        .with_children(|root| {
+            root.spawn(text(font, 26.0, ACCENT, "КУДА ПЛЫВЁМ"));
+            root.spawn(text(
+                font,
+                12.0,
+                DIM,
+                "серверы в твоей сети находятся сами; Esc — назад",
+            ));
+            root.spawn((
+                ServerList,
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    row_gap: Val::Px(5.0),
+                    margin: UiRect::top(Val::Px(10.0)),
+                    ..default()
+                },
+            ));
+        });
+}
+
+/// Перестраивает список серверов: найденные плюс запомненные.
+///
+/// Кнопки пересоздаются целиком, а не правятся: список короткий, меняется
+/// раз в секунду, и любая попытка обновлять его на месте была бы сложнее,
+/// чем собрать заново.
+#[allow(clippy::too_many_arguments)]
+pub fn update_servers(
+    mut commands: Commands,
+    time: Res<Time>,
+    font: Res<UiFont>,
+    server: Res<crate::ServerAddress>,
+    settings: Res<crate::settings::Settings>,
+    mut discovery: ResMut<crate::discovery::Discovery>,
+    list: Query<(Entity, Option<&Children>), With<ServerList>>,
+    mut last: Local<Vec<String>>,
+) {
+    crate::discovery::poll(&mut discovery, time.delta_secs());
+
+    // Собираем строки: сперва найденные, потом запомненные, потом адрес из
+    // командной строки как запасной вариант.
+    let mut rows: Vec<(String, String)> = Vec::new();
+    for found in &discovery.found {
+        rows.push((found.address.to_string(), format!("в сети:  {}", found.label())));
+    }
+    for saved in &settings.servers {
+        if rows.iter().any(|(address, _)| *address == saved.address) {
+            continue;
+        }
+        let name = if saved.name.is_empty() { "сохранённый" } else { &saved.name };
+        rows.push((saved.address.clone(), format!("{name}:  {}", saved.address)));
+    }
+    let fallback = server.0.to_string();
+    if !rows.iter().any(|(address, _)| *address == fallback) {
+        rows.push((fallback.clone(), format!("по умолчанию:  {fallback}")));
+    }
+
+    // Ничего не изменилось — не трогаем интерфейс.
+    let signature: Vec<String> = rows.iter().map(|(_, label)| label.clone()).collect();
+    if *last == signature {
+        return;
+    }
+    *last = signature;
+
+    let Ok((entity, children)) = list.single() else { return };
+    if let Some(children) = children {
+        for child in children.iter() {
+            commands.entity(child).despawn();
+        }
+    }
+
+    let font = &font.0;
+    commands.entity(entity).with_children(|list| {
+        for (address, label) in rows {
+            list.spawn((
+                ServerButton { address: address.clone(), name: label.clone() },
+                Button,
+                Node {
+                    width: Val::Px(430.0),
+                    justify_content: JustifyContent::Center,
+                    padding: UiRect::all(Val::Px(9.0)),
+                    border_radius: BorderRadius::all(Val::Px(5.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.07)),
+                Text::new(label),
+                TextFont {
+                    font: FontSource::Handle(font.clone()),
+                    font_size: FontSize::Px(13.0),
+                    ..default()
+                },
+                TextColor(INK),
+            ));
+        }
+    });
+}
+
+/// Выбор сервера: подключаемся и запоминаем.
+pub fn servers_input(
+    buttons: Query<(&Interaction, &ServerButton), Changed<Interaction>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut server: ResMut<crate::ServerAddress>,
+    mut settings: ResMut<crate::settings::Settings>,
+    mut next: ResMut<NextState<Screen>>,
+) {
+    if keys.just_pressed(KeyCode::Escape) {
+        next.set(Screen::Menu);
+        return;
+    }
+
+    for (interaction, button) in &buttons {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        let Ok(address) = button.address.parse() else { continue };
+        server.0 = address;
+        // Запоминаем именно то, к чему пошли: в следующий раз этот сервер будет
+        // первым в списке.
+        settings.remember(&button.address, &button.name);
+        next.set(Screen::Game);
+        return;
     }
 }
 
@@ -420,7 +673,9 @@ pub fn menu_input(
     }
 
     match chosen {
-        Some(MenuButton::Play) => next.set(Screen::Game),
+        // «Играть» ведёт не сразу в море, а на выбор сервера: своего, чужого
+        // или найденного в сети.
+        Some(MenuButton::Play) => next.set(Screen::Servers),
         Some(MenuButton::Wiki) => next.set(Screen::Wiki),
         Some(MenuButton::Update) => crate::update::act(&mut updater),
         Some(MenuButton::Quit) => {

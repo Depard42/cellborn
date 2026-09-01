@@ -1,8 +1,13 @@
 mod atlas;
+mod audio;
 mod body;
+mod crest;
 mod debug;
+mod discovery;
 mod fx;
+mod hazards;
 mod menu;
+mod settings;
 mod ui;
 mod update;
 mod wiki;
@@ -65,7 +70,15 @@ fn main() {
     app.add_systems(OnExit(Screen::Wiki), menu::despawn::<menu::WikiRoot>);
     app.add_systems(
         Update,
-        (menu::menu_input, menu::update_menu_status).run_if(in_state(Screen::Menu)),
+        (menu::menu_input, menu::update_menu_status, menu::volume_input)
+            .run_if(in_state(Screen::Menu)),
+    );
+    // Экран выбора сервера: поиск в сети идёт, только пока он открыт.
+    app.add_systems(OnEnter(Screen::Servers), menu::setup_servers);
+    app.add_systems(OnExit(Screen::Servers), menu::despawn::<menu::ServersRoot>);
+    app.add_systems(
+        Update,
+        (menu::update_servers, menu::servers_input).run_if(in_state(Screen::Servers)),
     );
     app.add_systems(
         Update,
@@ -78,6 +91,11 @@ fn main() {
     // После установки шрифта: панель отладки собирается в `Startup` и просит его.
     app.add_plugins(debug::plugin);
     app.add_plugins(update::plugin);
+    app.add_plugins(hazards::plugin);
+    app.add_plugins(crest::plugin);
+    app.add_plugins(settings::plugin);
+    app.add_plugins(audio::plugin);
+    app.add_plugins(discovery::plugin);
     app.add_systems(Startup, (setup_camera, world::setup_world, atlas::setup_preview));
     app.add_systems(OnEnter(Screen::Game), (ui::setup_hud, connect_client));
     app.add_systems(OnExit(Screen::Game), menu::despawn::<ui::GameUi>);

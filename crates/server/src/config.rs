@@ -182,6 +182,18 @@ settings! {
             "Минимум секунд между принятыми запросами мутации от одного клиента";
     }
 
+    "опасности и приманки" {
+        thorn_count: usize = THORN_COUNT, "Сколько колючек расставить в море (0 — выключить)";
+        thorn_damage: f32 = THORN_DAMAGE,
+            "Урон в секунду тому, кто слишком велик, чтобы пройти сквозь колючку";
+        leviathan_interval: f32 = LEVIATHAN_INTERVAL,
+            "Средний промежуток между заплывами чудовища, секунд (0 — выключить)";
+        leviathan_speed: f32 = LEVIATHAN_SPEED, "Скорость чудовища";
+        leviathan_damage: f32 = LEVIATHAN_DAMAGE, "Урон в секунду от касания чудовища";
+        feast_count: usize = FEAST_COUNT,
+            "Сколько лакомых мест держать одновременно (0 — еда сыплется ровно)";
+    }
+
     "боты" {
         wild_target: usize = WILD_TARGET, "Сколько диких ботов поддерживать в мире";
         wild_max_parts: usize = WILD_MAX_PARTS,
@@ -312,6 +324,10 @@ fn sanitize(config: &mut ServerConfig) {
     config.suffocation_damage = config.suffocation_damage.max(0.0);
     config.pollution_per_upkeep = config.pollution_per_upkeep.max(0.0);
     config.bot_vision = config.bot_vision.max(1.0);
+    config.thorn_damage = config.thorn_damage.max(0.0);
+    config.leviathan_interval = config.leviathan_interval.max(0.0);
+    config.leviathan_speed = config.leviathan_speed.max(0.0);
+    config.leviathan_damage = config.leviathan_damage.max(0.0);
 }
 
 /// Loads the config, writing a default file if there is none to read.
