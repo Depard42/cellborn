@@ -5,7 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-bevy.workspace = true
+# Ровно то, чем сервер пользуется: планировщик на потоках, логи и состояния.
+# Ни рендера, ни звука, ни окна — их не включает даже `MinimalPlugins`.
+bevy = { workspace = true, features = ["multi_threaded", "async_executor", "bevy_log", "bevy_state"] }
 serde.workspace = true
 rand.workspace = true
 tracing.workspace = true

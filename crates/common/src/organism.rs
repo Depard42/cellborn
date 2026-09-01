@@ -77,6 +77,36 @@ impl PartFamily {
         PartFamily::Membrane,
     ];
 
+    /// Место семейства в [`PartFamily::ALL`], то есть его ячейка в гистограмме
+    /// тела. Матч, а не поиск по массиву: гистограмма пересчитывается на каждую
+    /// часть каждого тела, и линейный проход по двадцати элементам здесь виден.
+    ///
+    /// Порядок обязан совпадать с `ALL` — за этим следит тест `slot_matches_all`.
+    pub fn slot(self) -> usize {
+        match self {
+            PartFamily::Flagellum => 0,
+            PartFamily::Cilia => 1,
+            PartFamily::Pseudopod => 2,
+            PartFamily::Mouth => 3,
+            PartFamily::Symbiont => 4,
+            PartFamily::Eye => 5,
+            PartFamily::Chemoreceptor => 6,
+            PartFamily::Gill => 7,
+            PartFamily::Osmoregulator => 8,
+            PartFamily::ThermalMembrane => 9,
+            PartFamily::Photosynthesis => 10,
+            PartFamily::StorageVacuole => 11,
+            PartFamily::MucusCoat => 12,
+            PartFamily::Carapace => 13,
+            PartFamily::Spike => 14,
+            PartFamily::Nematocyst => 15,
+            PartFamily::ToxinGland => 16,
+            PartFamily::Divisome => 17,
+            PartFamily::Mutator => 18,
+            PartFamily::Membrane => 19,
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             PartFamily::Membrane => "Мембрана",
@@ -483,18 +513,66 @@ pub const AGGRESSION_THRESHOLD: u32 = 7;
 /// the line splits.
 pub const KIN_SPLIT_THRESHOLD: u32 = 15;
 
+/// Сколько органов каждого семейства несёт тело: двадцать ячеек в порядке
+/// [`PartFamily::ALL`].
+///
+/// Родство считается по семействам, а не по точным частям, значит вся нужная
+/// для него информация о теле — эти двадцать чисел. Гистограмма меняется только
+/// когда тело отращивает орган, поэтому [`OrganismState`] держит её посчитанной
+/// и не собирает заново на каждое сравнение.
+///
+/// Раньше `genetic_distance` для одной пары делала сорок проходов по частям
+/// обоих тел (двадцать семейств × два тела). При семидесяти особях это две
+/// тысячи пар за тик — и это была самая дорогая операция на сервере.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FamilyCounts(pub [u8; PartFamily::ALL.len()]);
+
+impl FamilyCounts {
+    pub const EMPTY: FamilyCounts = FamilyCounts([0; PartFamily::ALL.len()]);
+
+    /// Считает гистограмму по геному. Один проход по частям вместо двадцати.
+    pub fn of(genome: &Genome) -> Self {
+        let mut counts = [0u8; PartFamily::ALL.len()];
+        for part in &genome.parts {
+            let slot = part.kind.family.slot();
+            // Насытить, а не переполнить: тело ограничено сотней частей, но
+            // предел живёт в конфиге сервера и может быть поднят.
+            counts[slot] = counts[slot].saturating_add(1);
+        }
+        Self(counts)
+    }
+
+    pub fn get(&self, family: PartFamily) -> u8 {
+        self.0[family.slot()]
+    }
+
+    /// Сколько органов разделяет два тела.
+    pub fn distance(&self, other: &Self) -> u32 {
+        let mut total = 0u32;
+        for slot in 0..PartFamily::ALL.len() {
+            total += (self.0[slot] as i32 - other.0[slot] as i32).unsigned_abs();
+        }
+        total
+    }
+}
+
+impl Default for FamilyCounts {
+    fn default() -> Self {
+        Self::EMPTY
+    }
+}
+
 /// How many organs separate two genomes.
 ///
 /// Counted by family, not by exact part: a large flagellum and a small one are
 /// still both flagella, and two cells built on the same plan should not become
 /// enemies over which variant they grew.
+///
+/// Тем, кто сравнивает тела в цикле, нужна не эта функция, а
+/// [`FamilyCounts::distance`] по уже посчитанным гистограммам: здесь обе
+/// собираются заново.
 pub fn genetic_distance(a: &Genome, b: &Genome) -> u32 {
-    PartFamily::ALL
-        .iter()
-        .map(|family| {
-            (a.count_family(*family) as i32 - b.count_family(*family) as i32).unsigned_abs()
-        })
-        .sum()
+    FamilyCounts::of(a).distance(&FamilyCounts::of(b))
 }
 
 /// Whether these two will fight on contact.
@@ -508,8 +586,30 @@ pub fn hostile(a: &Genome, b: &Genome) -> bool {
 
 /// Same rule with the server's own thresholds, which it may have configured.
 pub fn hostile_with(a: &Genome, b: &Genome, strangers: u32, kin: u32) -> bool {
-    let distance = genetic_distance(a, b);
-    if a.lineage == b.lineage {
+    hostile_counts(
+        &FamilyCounts::of(a),
+        a.lineage,
+        &FamilyCounts::of(b),
+        b.lineage,
+        strangers,
+        kin,
+    )
+}
+
+/// То же решение по уже посчитанным гистограммам — вариант для циклов по парам.
+///
+/// Ответ обязан совпадать с [`hostile_with`]: это одно правило, записанное так,
+/// чтобы его можно было применить, ничего не пересчитывая.
+pub fn hostile_counts(
+    a: &FamilyCounts,
+    a_lineage: u64,
+    b: &FamilyCounts,
+    b_lineage: u64,
+    strangers: u32,
+    kin: u32,
+) -> bool {
+    let distance = a.distance(b);
+    if a_lineage == b_lineage {
         distance > kin
     } else {
         distance > strangers
@@ -617,6 +717,12 @@ impl Default for Genome {
 #[derive(Component, Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OrganismState {
     pub genome: Genome,
+    /// Гистограмма семейств генома, посчитанная в [`OrganismState::recompute`].
+    ///
+    /// Кэш, а не отдельное состояние: он обязан совпадать с
+    /// `FamilyCounts::of(&self.genome)` в любой момент. Всё, что меняет геном,
+    /// проходит через `recompute`.
+    pub families: FamilyCounts,
     pub mass: f32,
     pub energy: f32,
     pub health: f32,
@@ -641,6 +747,7 @@ impl Default for OrganismState {
     fn default() -> Self {
         let mut state = Self {
             genome: Genome::starter(),
+            families: FamilyCounts::EMPTY,
             mass: BASE_MASS,
             energy: BASE_ENERGY_CAP,
             health: MAX_HEALTH,
@@ -668,7 +775,11 @@ impl OrganismState {
     }
 
     /// Tolerances and mass are a pure function of the parts.
+    ///
+    /// Гистограмма семейств — тоже: она пересчитывается здесь, чтобы родство
+    /// сравнивалось по готовым числам, а не по частям тела.
     pub fn recompute(&mut self) {
+        self.families = FamilyCounts::of(&self.genome);
         let mut temperature = BASE_TEMPERATURE_TOLERANCE;
         let mut salinity = BASE_SALINITY_TOLERANCE;
         let mut toxin = BASE_TOXIN_RESISTANCE;

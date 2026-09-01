@@ -444,14 +444,13 @@ pub fn animate_food(
 /// Cross-fades the whole look when the season changes.
 pub fn apply_season(
     time: Res<Time>,
-    player: Query<&PlayerEnvironment>,
+    water: Res<WorldUpdate>,
     mut clear: ResMut<ClearColor>,
     mut ambient: ResMut<GlobalAmbientLight>,
     mut sun: Query<(&mut DirectionalLight, &mut Transform)>,
     mut fog: Query<&mut DistanceFog>,
 ) {
-    let season = player.iter().next().map(|e| e.season).unwrap_or(Season::Bloom);
-    let target = palette(season);
+    let target = palette(water.season);
     let k = (time.delta_secs() * 0.6).min(1.0);
 
     clear.0 = mix(clear.0, target.water, k);

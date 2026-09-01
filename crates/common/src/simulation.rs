@@ -405,6 +405,85 @@ mod tests {
         assert!(crate::hostile(&parent, &far), "род раскалывается после {KIN_SPLIT_THRESHOLD}");
     }
 
+    /// Гистограмма семейств — кэш, и место семейства в ней должно совпадать с
+    /// его местом в `ALL`, иначе дистанция считается между разными ячейками.
+    #[test]
+    fn slot_matches_all() {
+        for (index, family) in PartFamily::ALL.iter().enumerate() {
+            assert_eq!(family.slot(), index, "{} стоит не на своём месте", family.name());
+        }
+    }
+
+    /// Кэш обязан совпадать с честным подсчётом после **любого** изменения тела:
+    /// мутации, деления, возрождения. Разойдётся — организмы начнут считать
+    /// родню чужаками и наоборот, и это не будет видно нигде, кроме боя.
+    #[test]
+    fn family_counts_cache_never_drifts() {
+        let fresh = |state: &OrganismState| crate::FamilyCounts::of(&state.genome);
+
+        let mut organism = OrganismState::from_genome(Genome::starter_of(3));
+        assert_eq!(organism.families, fresh(&organism), "стартовое тело");
+
+        // Мутация: очков даём с запасом, чтобы дошло до предела частей.
+        organism.genome.mutation_points = 60_000;
+        for kind in [
+            PartKind::basic(PartFamily::Spike),
+            PartKind::new(PartFamily::Gill, PartVariant::Refined),
+            PartKind::new(PartFamily::Spike, PartVariant::Large),
+            PartKind::basic(PartFamily::Mutator),
+        ] {
+            assert!(organism.apply_mutation(kind), "мутация {} не прошла", kind.name());
+            assert_eq!(organism.families, fresh(&organism), "после {}", kind.name());
+        }
+        // Два шипа разных вариантов — это два шипа: гистограмма считает семейства.
+        assert_eq!(organism.families.get(PartFamily::Spike), 2);
+
+        // Деление: потомок собирается через `from_genome`, значит тоже считается.
+        let child = OrganismState::from_genome(crate::conceive(&organism.genome, true, 7));
+        assert_eq!(child.families, fresh(&child), "потомок");
+
+        // Отказанная мутация не должна трогать ни геном, ни кэш.
+        let mut broke = OrganismState::from_genome(Genome::starter_of(9));
+        let before = broke.families;
+        assert!(!broke.apply_mutation(PartKind::basic(PartFamily::Carapace)), "нечем платить");
+        assert_eq!(broke.families, before);
+        assert_eq!(broke.families, fresh(&broke));
+    }
+
+    /// Быстрое решение по гистограммам и медленное по геномам — одно правило.
+    /// Если они разойдутся, бой и поведение ботов начнут спорить друг с другом.
+    #[test]
+    fn hostile_counts_agrees_with_hostile_with() {
+        let mut bodies: Vec<Genome> = Vec::new();
+        for lineage in 0..3u64 {
+            for extra in 0..9 {
+                let mut genome = Genome::starter_of(lineage);
+                for i in 0..extra {
+                    genome.push_part(crate::random_part(i * 37 + lineage));
+                }
+                bodies.push(genome);
+            }
+        }
+        for a in &bodies {
+            for b in &bodies {
+                let slow = crate::hostile_with(a, b, AGGRESSION_THRESHOLD, KIN_SPLIT_THRESHOLD);
+                let fast = crate::hostile_counts(
+                    &crate::FamilyCounts::of(a),
+                    a.lineage,
+                    &crate::FamilyCounts::of(b),
+                    b.lineage,
+                    AGGRESSION_THRESHOLD,
+                    KIN_SPLIT_THRESHOLD,
+                );
+                assert_eq!(slow, fast, "решения разошлись");
+                assert_eq!(
+                    crate::genetic_distance(a, b),
+                    crate::FamilyCounts::of(a).distance(&crate::FamilyCounts::of(b))
+                );
+            }
+        }
+    }
+
     /// Bodies must not be able to occupy the same water.
     #[test]
     fn overlapping_bodies_are_pushed_apart() {

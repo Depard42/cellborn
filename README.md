@@ -25,8 +25,10 @@ Multiplayer cell-stage prototype inspired by the *design space* of cell-evolutio
   its own offspring.
 - Bots: wild organisms that mutate and hunt on their own, plus colonies of kin.
 - Spiteful mutations: a toxin gland poisons the water everyone swims through.
-- See `docs/MECHANICS.md` for how it all works and `docs/TESTING.md` for what to
-  check by hand.
+- An F1 debug overlay: client frame rate, what the client can actually see, and
+  the server's own tick time, population and food count sent alongside it.
+- See `docs/MECHANICS.md` for how it all works, `docs/TESTING.md` for what to
+  check by hand, and `docs/PERFORMANCE.md` for what the server costs and why.
 
 ## Run
 
@@ -73,9 +75,10 @@ the `.bat` launchers. Copy the folder to a Windows machine and run `ИГРАТЬ
 assets to ship, the font is compiled into the binary and everything else is
 procedural.
 
-Swim with WASD or the arrow keys. Shared network constants (port, protocol id, key,
-tick rate) live in `crates/common/src/network.rs` — client and server must agree on
-them or the netcode handshake fails.
+Swim with WASD or the arrow keys; F1 opens the debug overlay in game. Shared
+network constants (port, protocol id, key, tick rate) live in
+`crates/common/src/network.rs` — client and server must agree on them or the
+netcode handshake fails.
 
 ## Design direction
 
@@ -131,7 +134,8 @@ The long-term goal is that a player can be strong against another organism and s
 
 Milestones 1-4 of `docs/ROADMAP.md` are implemented. What is left:
 
-1. Interest management (rooms), tests and CI, metrics — roadmap milestone 5.
+1. Interest management (rooms), tests and CI — roadmap milestone 5. Metrics are
+   in: see the F1 overlay and `docs/PERFORMANCE.md`.
 2. Fused procedural body and membrane shader — roadmap milestone 3, stages B and C.
 3. Reproduction and inherited mutation.
 4. Biomes and local environmental gradients.

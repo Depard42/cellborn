@@ -1,6 +1,8 @@
 mod ai;
 mod config;
+mod grid;
 mod life;
+mod metrics;
 
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::platform::collections::HashMap;
@@ -13,7 +15,9 @@ use lightyear::prelude::*;
 use rand::Rng;
 
 use config::ServerConfig;
+use grid::FoodGrid;
 use life::{random_position, spawn_organism};
+use metrics::TickClock;
 
 fn main() {
     let mut app = App::new();
@@ -53,28 +57,41 @@ impl Plugin for ServerGamePlugin {
         app.insert_resource(environment);
         app.insert_resource(ReplicationMetadata::new(SEND_INTERVAL));
         app.init_resource::<RequestCooldowns>();
+        app.init_resource::<FoodGrid>();
+        app.init_resource::<TickClock>();
         app.insert_resource(SeasonWatch(Season::Bloom));
         app.add_systems(Startup, start_server);
+        // Порядок несущий: движение → расталкивание → еда → бой. Тело сначала
+        // оказывается там, где оказалось, потом перестаёт занимать чужую воду,
+        // и только после этого ест и дерётся — иначе можно съесть то, до чего
+        // на самом деле не дотянулся.
+        //
+        // Сетка еды пересобирается в начале тика: ей пользуются и боты при
+        // выборе цели, и кормление.
+        // Сгруппировано по смыслу, но порядок остаётся сквозным: каждая группа
+        // упорядочена внутри себя и относительно соседних.
         app.add_systems(
             FixedUpdate,
             (
-                advance_environment,
-                ai::bot_movement,
-                ai::bot_mutation,
-                movement,
-                life::separate_bodies,
-                feeding,
-                life::combat,
-                life::emit_toxins,
-                life::decay_toxins,
-                life::survival,
-                life::divide,
-                life::deaths,
-                life::respawn,
-                spawn_food,
-                ai::maintain_wild,
-                census_log,
-                project_state,
+                // Кто где оказался.
+                (
+                    metrics::tick_begin,
+                    advance_environment,
+                    rebuild_food_grid,
+                    ai::bot_perception,
+                    ai::bot_movement,
+                    ai::bot_mutation,
+                    movement,
+                    life::separate_bodies,
+                )
+                    .chain(),
+                // Что с ним из-за этого случилось.
+                (feeding, life::combat, life::emit_toxins, life::decay_toxins, life::survival)
+                    .chain(),
+                // Кто родился, кто умер, чем зарос мир.
+                (life::divide, life::deaths, life::respawn, spawn_food, ai::maintain_wild).chain(),
+                // Что об этом узнают наружу.
+                (census_log, project_state, broadcast_state, metrics::tick_end).chain(),
             )
                 .chain(),
         );
@@ -177,25 +194,28 @@ fn movement(
     }
 }
 
+/// Пересобирает сетку еды на начало тика.
+///
+/// Одна сетка на всех: раньше `feeding` строила свою и выбрасывала её в конце
+/// системы, а `bot_perception` отдельно копировала позиции всех частиц, чтобы
+/// каждый бот прошёл их линейно.
+fn rebuild_food_grid(mut grid: ResMut<FoodGrid>, nutrients: Query<(Entity, &FoodPosition, &Nutrient)>) {
+    grid.rebuild(nutrients.iter().map(|(entity, position, nutrient)| {
+        (entity, position.0, nutrient.energy)
+    }));
+}
+
 /// Server-authoritative feeding. A nutrient is consumed by the first organism whose
 /// mouth reaches it; eating is never predicted, so nothing can flicker back.
 fn feeding(
     mut commands: Commands,
     config: Res<ServerConfig>,
-    nutrients: Query<(Entity, &FoodPosition, &Nutrient)>,
+    mut grid: ResMut<FoodGrid>,
     mut organisms: Query<(&PlayerPosition, &mut OrganismState, &mut PlayerProgress)>,
 ) {
-    if nutrients.is_empty() {
+    if grid.is_empty() {
         return;
     }
-    // Bucket nutrients by grid cell: a full scan per organism melts at scale.
-    const CELL: f32 = 4.0;
-    let mut grid: HashMap<(i32, i32), Vec<(Entity, Vec3, f32)>> = HashMap::default();
-    for (entity, pos, nutrient) in &nutrients {
-        let key = ((pos.0.x / CELL).floor() as i32, (pos.0.z / CELL).floor() as i32);
-        grid.entry(key).or_default().push((entity, pos.0, nutrient.energy));
-    }
-
     let mut eaten: Vec<Entity> = Vec::new();
     for (position, mut organism, mut progress) in &mut organisms {
         if progress.dead {
@@ -203,27 +223,23 @@ fn feeding(
         }
         let Some(reach) = feeding_reach(&organism) else { continue; };
         let cap = organism.energy_cap();
-        let (cx, cz) = ((position.0.x / CELL).floor() as i32, (position.0.z / CELL).floor() as i32);
-        let span = (reach / CELL).ceil() as i32;
-        for dx in -span..=span {
-            for dz in -span..=span {
-                let Some(cell) = grid.get(&(cx + dx, cz + dz)) else { continue; };
-                for (entity, food_pos, energy) in cell {
-                    if eaten.contains(entity) {
-                        continue;
-                    }
-                    if position.0.distance_squared(*food_pos) > reach * reach {
-                        continue;
-                    }
-                    organism.energy = (organism.energy + energy).min(cap);
-                    organism.absorbed += energy;
-                    // Поел — значит рана снова заживает: не нужно ждать, пока
-                    // истечёт боевой откат, если ты сумел поесть под огнём.
-                    organism.combat_timer = 0.0;
-                    progress.bites = progress.bites.wrapping_add(1);
-                    eaten.push(*entity);
-                }
-            }
+        let mut absorbed = 0.0;
+        let mut bites = 0u32;
+        grid.for_each_near(position.0, reach, |entry| {
+            // Флаг в самой сетке вместо поиска по списку съеденного: частица,
+            // доставшаяся одному рту, не достанется никакому другому в этом тике.
+            entry.taken = true;
+            absorbed += entry.energy;
+            bites += 1;
+            eaten.push(entry.entity);
+        });
+        if bites > 0 {
+            organism.energy = (organism.energy + absorbed).min(cap);
+            organism.absorbed += absorbed;
+            // Поел — значит рана снова заживает: не нужно ждать, пока
+            // истечёт боевой откат, если ты сумел поесть под огнём.
+            organism.combat_timer = 0.0;
+            progress.bites = progress.bites.wrapping_add(bites);
         }
         organism.claim_points_at(config.energy_per_mutation_point);
     }
@@ -239,11 +255,12 @@ fn spawn_food(
     config: Res<ServerConfig>,
     env: Res<Environment>,
     time: Res<Time>,
-    nutrients: Query<(), With<Nutrient>>,
+    grid: Res<FoodGrid>,
     mut budget: Local<f32>,
 ) {
+    // Сколько еды в воде, сетка уже знает: она пересобрана в начале тика.
     let target = (config.food_target as f32 * env.food_density) as usize;
-    let live = nutrients.iter().count();
+    let live = grid.len();
     if live >= target {
         *budget = 0.0;
         return;
@@ -327,34 +344,53 @@ fn handle_mutation_requests(
     }
 }
 
+/// Насколько должно сдвинуться число, чтобы это стоило пакета.
+///
+/// Присваивание помечает компонент изменённым, а изменённый компонент уходит по
+/// сети на ближайшей отправке. Здоровье восстанавливается по два в секунду, то
+/// есть за тик меняется на три сотых — и раньше каждая такая сотая улетала всем
+/// клиентам. Порог мельче, чем видно на полоске, но превращает поток из
+/// пятидесяти обновлений в секунду в несколько.
+const VITALS_EPSILON: f32 = 0.25;
+/// То же для энергии: её шкала — сотня с лишним, полделения не видно.
+const ENERGY_EPSILON: f32 = 0.5;
+
 /// Copies the authoritative state into the replicated projection, only when it
 /// actually changed, so unchanged organisms cost no bandwidth.
 fn project_state(
     config: Res<ServerConfig>,
-    env: Res<Environment>,
-    clouds: Query<&ToxinCloud>,
     mut query: Query<(
-        &PlayerPosition,
         &OrganismState,
         &mut PlayerGenome,
         &mut PlayerVitals,
         &mut PlayerProgress,
-        &mut PlayerEnvironment,
+        Option<&mut PlayerEnergy>,
     )>,
 ) {
-    let clouds: Vec<ToxinCloud> = clouds.iter().copied().collect();
-    for (position, organism, mut genome, mut vitals, mut progress, mut player_env) in &mut query {
+    for (organism, mut genome, mut vitals, mut progress, energy) in &mut query {
         if genome.0 != organism.genome {
             genome.0 = organism.genome.clone();
         }
-        let new_vitals = PlayerVitals {
-            mass: organism.mass,
-            energy: organism.energy,
-            energy_cap: organism.energy_cap(),
-            health: organism.health,
-        };
-        if *vitals != new_vitals {
-            *vitals = new_vitals;
+        // Масса меняется только при мутации, здоровье — непрерывно; сравнение
+        // с порогом покрывает оба случая.
+        if (vitals.mass - organism.mass).abs() > f32::EPSILON
+            || (vitals.health - organism.health).abs() > VITALS_EPSILON
+            // Ноль и полный запас должны доезжать точно: на них смотрит игрок.
+            || (organism.health <= 0.0 && vitals.health > 0.0)
+            || (organism.health >= MAX_HEALTH && vitals.health < MAX_HEALTH)
+        {
+            *vitals = PlayerVitals { mass: organism.mass, health: organism.health };
+        }
+        // Энергия висит только на организмах игроков — у ботов её никто не
+        // спрашивает, и незачем гонять по сети самое часто меняющееся число.
+        if let Some(mut energy) = energy {
+            let cap = organism.energy_cap();
+            if (energy.energy - organism.energy).abs() > ENERGY_EPSILON
+                || (energy.cap - cap).abs() > f32::EPSILON
+                || (organism.energy <= 0.0 && energy.energy > 0.0)
+            {
+                *energy = PlayerEnergy { energy: organism.energy, cap };
+            }
         }
         if progress.points != organism.genome.mutation_points {
             progress.points = organism.genome.mutation_points;
@@ -362,20 +398,101 @@ fn project_state(
         if progress.max_parts != config.max_parts as u16 {
             progress.max_parts = config.max_parts as u16;
         }
-        // The reported toxin level is the local one, clouds included: the HUD
-        // should show the water the organism is actually in.
-        let local_toxin =
-            env.toxin_level + clouds.iter().map(|c| c.toxin_at(position.0)).sum::<f32>();
-        let new_env = PlayerEnvironment {
-            season: env.season,
-            temperature: env.temperature,
-            salinity: env.salinity,
-            oxygen: env.oxygen,
-            toxin: local_toxin,
-        };
-        if *player_env != new_env {
-            *player_env = new_env;
+    }
+}
+
+/// Кому и по чему сервер пишет: адрес клиента и два его почтовых ящика.
+type ClientChannels<'a> = (
+    &'a RemoteId,
+    &'a mut MessageSender<WorldUpdate>,
+    &'a mut MessageSender<ServerStats>,
+);
+
+/// Как часто клиент узнаёт о воде вокруг себя.
+const WORLD_UPDATE_INTERVAL: f32 = 0.1;
+/// Как часто клиент получает сводку о самочувствии сервера.
+const STATS_INTERVAL: f32 = 0.5;
+
+/// Рассылает клиентам то, чему не место в репликации компонентов: воду вокруг
+/// игрока и сводку о сервере.
+///
+/// Среда раньше была компонентом на каждом организме — семьдесят копий одного и
+/// того же ради одной, которую читает клиент. Здесь она уходит по одному
+/// сообщению на клиента десять раз в секунду, и только `toxin` в нём
+/// действительно свой: он зависит от того, в каком облаке стоит тело.
+#[allow(clippy::too_many_arguments)]
+fn broadcast_state(
+    time: Res<Time>,
+    env: Res<Environment>,
+    clock: Res<TickClock>,
+    grid: Res<FoodGrid>,
+    clouds: Query<&ToxinCloud>,
+    organisms: Query<(&PlayerId, &PlayerPosition)>,
+    census: Query<(), With<PlayerGenome>>,
+    mut clients: Query<ClientChannels, With<ClientOf>>,
+    mut world_due: Local<f32>,
+    mut stats_due: Local<f32>,
+) {
+    let dt = time.delta_secs();
+    *world_due -= dt;
+    *stats_due -= dt;
+    let send_world = *world_due <= 0.0;
+    let send_stats = *stats_due <= 0.0;
+    if !send_world && !send_stats {
+        return;
+    }
+    if clients.is_empty() {
+        // Таймеры всё равно надо двигать, иначе первый подключившийся получит
+        // залп из всего, что накопилось, пока сервер стоял пустым.
+        if send_world {
+            *world_due = WORLD_UPDATE_INTERVAL;
         }
+        if send_stats {
+            *stats_due = STATS_INTERVAL;
+        }
+        return;
+    }
+
+    let clouds: Vec<ToxinCloud> = clouds.iter().copied().collect();
+    let stats = send_stats.then(|| {
+        metrics::snapshot(
+            &clock,
+            census.iter().count(),
+            grid.len(),
+            clouds.len(),
+            clients.iter().len(),
+        )
+    });
+
+    for (remote, mut world, mut summary) in &mut clients {
+        if send_world {
+            // The reported toxin level is the local one, clouds included: the HUD
+            // should show the water the organism is actually in.
+            let local_toxin = organisms
+                .iter()
+                .find(|(id, _)| id.0 == remote.0)
+                .map(|(_, position)| {
+                    clouds.iter().map(|c| c.toxin_at(position.0)).sum::<f32>()
+                })
+                .unwrap_or(0.0);
+            world.send::<StateChannel>(WorldUpdate {
+                season: env.season,
+                temperature: env.temperature,
+                salinity: env.salinity,
+                oxygen: env.oxygen,
+                toxin: env.toxin_level + local_toxin,
+            });
+        }
+        if let Some(stats) = stats {
+            summary.send::<StateChannel>(stats);
+        }
+    }
+
+    if send_world {
+        *world_due = WORLD_UPDATE_INTERVAL;
+    }
+    if send_stats {
+        *stats_due = STATS_INTERVAL;
     }
 }
 
@@ -384,6 +501,8 @@ fn project_state(
 fn census_log(
     config: Res<ServerConfig>,
     time: Res<Time>,
+    clock: Res<TickClock>,
+    grid: Res<FoodGrid>,
     mut next: Local<f32>,
     organisms: Query<&PlayerGenome>,
     clouds: Query<(), With<ToxinCloud>>,
@@ -397,15 +516,17 @@ fn census_log(
     let mut per_lineage: HashMap<u64, usize> = HashMap::default();
     let mut generation = 0;
     let mut parts = 0;
+    let mut total = 0;
     for genome in &organisms {
         *per_lineage.entry(genome.0.lineage).or_default() += 1;
         generation = generation.max(genome.0.generation);
         parts = parts.max(genome.0.parts.len());
+        total += 1;
     }
     info!(
         "перепись: организмов {} (предел {}), родов {}, крупнейшая колония {} (предел {}), \
          поколение до {}, частей до {}, облаков {}",
-        organisms.iter().count(),
+        total,
         config.max_organisms,
         per_lineage.len(),
         per_lineage.values().copied().max().unwrap_or(0),
@@ -413,5 +534,18 @@ fn census_log(
         generation,
         parts,
         clouds.iter().count()
+    );
+    // Та же сводка, что уходит в оверлей по F1, но её видно и без клиента.
+    // Пик важнее среднего: он показывает, насколько близко тик подходит к своему
+    // бюджету в худшем случае, а не в среднем по секунде.
+    let budget = tick_duration().as_secs_f32() * 1000.0;
+    info!(
+        "тик: {:.2} мс сред, {:.2} пик из {:.1} бюджета ({:.0}% занято), {:.1} тиков/с, еды {}",
+        clock.avg_ms,
+        clock.peak_ms,
+        budget,
+        clock.avg_ms / budget * 100.0,
+        clock.ticks_per_second,
+        grid.len()
     );
 }

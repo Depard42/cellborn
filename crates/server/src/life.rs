@@ -53,6 +53,10 @@ pub struct BotState {
     pub panic_side: f32,
     pub panic_rate: f32,
     pub panic_break: f32,
+    /// Через сколько секунд бот снова осмотрится.
+    pub think_in: f32,
+    /// Что он решил, когда смотрел в последний раз.
+    pub perception: crate::ai::Perception,
 }
 
 impl Default for BotState {
@@ -65,6 +69,11 @@ impl Default for BotState {
             panic_side: 1.0,
             panic_rate: 4.0,
             panic_break: 0.0,
+            // Случайная фаза раздумий. Колония рождается пачкой, и без сдвига
+            // все её клетки осматривались бы в один и тот же тик: вместо ровной
+            // нагрузки сервер получил бы пилу.
+            think_in: rand::rng().random_range(0.0..crate::ai::PERCEPTION_PERIOD),
+            perception: crate::ai::Perception::default(),
         }
     }
 }
@@ -77,6 +86,8 @@ pub fn spawn_organism(
     owner: Option<(PeerId, Entity)>,
     brain: Option<Brain>,
 ) -> Entity {
+    // Считаем до того, как состояние уйдёт в сущность: дальше его уже не занять.
+    let vitals = PlayerEnergy { energy: state.energy, cap: state.energy_cap() };
     let mut entity = commands.spawn((
         organism_bundle(&state, position),
         Divider::default(),
@@ -92,6 +103,10 @@ pub fn spawn_organism(
         Some((peer, link)) => {
             entity.insert((
                 PlayerId(peer),
+                // Запас энергии есть только у тела игрока: его рисует полоска в
+                // интерфейсе. У бота его никто не спрашивает, а меняется оно
+                // каждый тик — самое дорогое, что можно реплицировать зря.
+                vitals,
                 PredictionTarget::to_clients(NetworkTarget::Single(peer)),
                 InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(peer)),
                 ControlledBy { owner: link, lifetime: Default::default() },
@@ -144,10 +159,26 @@ pub fn separate_bodies(mut organisms: Query<(Entity, &mut PlayerPosition, &Organ
     }
 }
 
+/// Всё, что бой знает об организме: снимок на начало тика.
+///
+/// Урон симметричен, поэтому его нельзя применять по ходу обхода пар — сначала
+/// снимок, потом решения, потом записи.
+struct Combatant {
+    entity: Entity,
+    position: Vec3,
+    radius: f32,
+    attack: f32,
+    defense: f32,
+    families: FamilyCounts,
+    lineage: u64,
+    dead: bool,
+}
+
 /// Contact damage between organisms that are far enough apart genetically.
 ///
-/// Kin never fight, however different they have grown: the lineage check comes
-/// before the distance check in [`hostile`].
+/// Kin never fight, however different they have grown — [`hostile_counts`] checks
+/// the lineage before the distance it has drifted. Порядок самих проверок в паре
+/// обратный: сперва дешёвое расстояние, и только для соприкоснувшихся — родство.
 pub fn combat(
     config: Res<ServerConfig>,
     time: Res<Time>,
@@ -160,18 +191,21 @@ pub fn combat(
 ) {
     let dt = time.delta_secs();
     // Snapshot first: damage is symmetric, so it cannot be applied while iterating.
-    let snapshot: Vec<(Entity, Vec3, f32, f32, f32, Genome, bool)> = organisms
+    //
+    // Геном сюда больше не копируется: для родства нужна гистограмма семейств,
+    // которую тело и так держит посчитанной, а это двадцать байт вместо клона
+    // вектора частей на каждую особь каждый тик.
+    let snapshot: Vec<Combatant> = organisms
         .iter()
-        .map(|(e, pos, state, progress)| {
-            (
-                e,
-                pos.0,
-                body_radius(state.mass),
-                attack_power_with(&state, config.base_attack),
-                defense(&state),
-                state.genome.clone(),
-                progress.dead,
-            )
+        .map(|(entity, pos, state, progress)| Combatant {
+            entity,
+            position: pos.0,
+            radius: body_radius(state.mass),
+            attack: attack_power_with(state, config.base_attack),
+            defense: defense(state),
+            families: state.families,
+            lineage: state.genome.lineage,
+            dead: progress.dead,
         })
         .collect();
 
@@ -179,18 +213,30 @@ pub fn combat(
     for i in 0..snapshot.len() {
         for j in (i + 1)..snapshot.len() {
             let (a, b) = (&snapshot[i], &snapshot[j]);
-            if a.6 || b.6 {
+            if a.dead || b.dead {
                 continue;
             }
-            if !hostile_with(&a.5, &b.5, config.aggression_threshold, config.kin_split_threshold) {
+            // Расстояние — первым. Оно стоит одно вычитание и отсекает почти
+            // всё: пар при полной арене больше двух тысяч, а в контакте всегда
+            // единицы. Раньше первой шла проверка родства, то есть самая дорогая
+            // операция сервера выполнялась для каждой пары, чтобы почти всегда
+            // быть выброшенной следующей строкой.
+            let reach = a.radius + b.radius + config.attack_margin;
+            if a.position.distance_squared(b.position) > reach * reach {
                 continue;
             }
-            let reach = a.2 + b.2 + config.attack_margin;
-            if a.1.distance_squared(b.1) > reach * reach {
+            if !hostile_counts(
+                &a.families,
+                a.lineage,
+                &b.families,
+                b.lineage,
+                config.aggression_threshold,
+                config.kin_split_threshold,
+            ) {
                 continue;
             }
-            damage.push((b.0, a.0, a.3 * (1.0 - b.4) * dt));
-            damage.push((a.0, b.0, b.3 * (1.0 - a.4) * dt));
+            damage.push((b.entity, a.entity, a.attack * (1.0 - b.defense) * dt));
+            damage.push((a.entity, b.entity, b.attack * (1.0 - a.defense) * dt));
         }
     }
 
@@ -268,10 +314,27 @@ pub fn decay_toxins(
         }
         // Clouds disperse: they widen and thin out as they age.
         let fade = (life.0 / config.toxin_lifetime).clamp(0.0, 1.0);
-        cloud.radius = config.toxin_radius * (1.4 - 0.4 * fade);
-        cloud.strength = cloud.strength.min(fade * 0.5 + 0.05);
+        let radius = config.toxin_radius * (1.4 - 0.4 * fade);
+        let strength = cloud.strength.min(fade * 0.5 + 0.05);
+        // Присваивание помечает компонент изменённым, а изменённый компонент
+        // уходит по сети — то есть безусловная запись отправляла каждое облако
+        // всем клиентам пятьдесят раз в секунду ради движения радиуса на доли
+        // процента. Пишем, только когда есть что показать.
+        if (cloud.radius - radius).abs() > CLOUD_EPSILON
+            || (cloud.strength - strength).abs() > CLOUD_EPSILON
+        {
+            cloud.radius = radius;
+            cloud.strength = strength;
+        }
     }
 }
+
+/// Насколько должно измениться облако, чтобы это стоило пакета.
+///
+/// Облако живёт одиннадцать секунд и за это время расширяется примерно на метр;
+/// сотая доля — это шаг мельче, чем видно на экране, но она превращает поток из
+/// пятидесяти обновлений в секунду в несколько.
+const CLOUD_EPSILON: f32 = 0.01;
 
 pub fn survival(
     config: Res<ServerConfig>,
@@ -307,6 +370,13 @@ pub fn survival(
     }
 }
 
+/// Как часто сервер вообще думает о делении.
+///
+/// Между делениями проходят десятки секунд, а перепись колонии стоит прохода по
+/// всем организмам. Четыре раза в секунду — предел, за которым разницу уже никто
+/// не заметит.
+const DIVISION_CHECK_INTERVAL: f32 = 0.25;
+
 /// Cell division. The offspring inherits the genome and may be born changed.
 pub fn divide(
     mut commands: Commands,
@@ -320,8 +390,17 @@ pub fn divide(
         Option<&Brain>,
     )>,
     census: Query<&PlayerGenome>,
+    mut since: Local<f32>,
 ) {
-    let dt = time.delta_secs();
+    // Деление — решение на десятки секунд, а перепись ради него шла каждый тик.
+    // Накапливаем время и просыпаемся несколько раз в секунду: таймеры получают
+    // ровно то же суммарное dt, значит скорость размножения не меняется.
+    *since += time.delta_secs();
+    if *since < DIVISION_CHECK_INTERVAL {
+        return;
+    }
+    let dt = std::mem::take(&mut *since);
+
     let total = census.iter().count();
     if total >= config.max_organisms {
         return;

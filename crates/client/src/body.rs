@@ -591,6 +591,9 @@ pub fn animate_bodies(
         &mut Body,
         &PlayerPosition,
         &PlayerVitals,
+        // Энергия есть только у тел игроков: ботам её никто не реплицирует.
+        // Она здесь ради дыхания — голодная клетка дышит чаще и мельче.
+        Option<&PlayerEnergy>,
         &PlayerProgress,
         &mut Transform,
     )>,
@@ -635,7 +638,7 @@ pub fn animate_bodies(
 ) {
     let dt = time.delta_secs().max(1e-5);
 
-    for (entity, mut body, position, vitals, progress, mut transform) in &mut organisms {
+    for (entity, mut body, position, vitals, energy, progress, mut transform) in &mut organisms {
         // Velocity is measured, not simulated: presentation never writes state.
         let delta = position.0 - body.last_position;
         let measured = delta.length() / dt;
@@ -696,7 +699,11 @@ pub fn animate_bodies(
 
         let radius = body_radius(vitals.mass);
         body.radius = radius;
-        let starving = (vitals.energy / vitals.energy_cap.max(1.0)).clamp(0.0, 1.0);
+        // Без своей энергии считаем тело сытым: у чужой клетки дыхание — деталь,
+        // а не информация, и врать ею о чужом состоянии не нужно.
+        let starving = energy
+            .map(|e| (e.energy / e.cap.max(1.0)).clamp(0.0, 1.0))
+            .unwrap_or(1.0);
         // Breathing is slow when calm, shallow and fast when starving.
         let breathe = (body.phase * 1.1).sin() * (0.08 + 0.05 * starving);
         // Squash and stretch along the direction of travel.

@@ -4,21 +4,52 @@
 //! that drift, feed, mutate on their own and hunt whatever is different enough
 //! from them, and colony cells — the offspring of a lineage, which keep to their
 //! kin and only fight outsiders.
+//!
+//! Восприятие и движение здесь разделены намеренно. Решение «куда я хочу» — это
+//! решение, а не движение: оно принимается несколько раз в секунду, и никто на
+//! это не смотрит. Шаг тела остаётся на частоте физики, иначе бот задёргается.
 
 use bevy::prelude::*;
 use cellborn_common::*;
 use rand::Rng;
 
 use crate::config::ServerConfig;
+use crate::grid::FoodGrid;
 use crate::life::{random_position, spawn_organism, Brain, BotState};
+
+/// Сколько раз в секунду бот пересматривает, куда плывёт.
+///
+/// Шестьдесят четыре раза в секунду он делал это раньше — и это была вторая по
+/// стоимости вещь на сервере. Десять раз в секунду неотличимо на глаз: жертва за
+/// сотую долю секунды успевает сместиться на несколько сантиметров.
+pub const PERCEPTION_HZ: f32 = 10.0;
+
+/// Тот же интервал в секундах — для разноса фаз при рождении бота.
+pub const PERCEPTION_PERIOD: f32 = 1.0 / PERCEPTION_HZ;
+
+/// Как часто бот думает о том, чтобы потратить очки.
+const MUTATION_CHECK_INTERVAL: f32 = 0.5;
+
+/// Как часто сервер проверяет, хватает ли в мире диких.
+const WILD_CHECK_INTERVAL: f32 = 1.0;
 
 /// Keeps the arena populated with wild organisms.
 pub fn maintain_wild(
     mut commands: Commands,
     config: Res<ServerConfig>,
+    time: Res<Time>,
     wild: Query<&Brain>,
     census: Query<&PlayerGenome>,
+    mut since: Local<f32>,
 ) {
+    // Два прохода по всем организмам ради решения, которое меняется раз в
+    // десятки секунд, — раз в секунду этого более чем достаточно.
+    *since += time.delta_secs();
+    if *since < WILD_CHECK_INTERVAL {
+        return;
+    }
+    *since = 0.0;
+
     let alive = wild.iter().filter(|b| **b == Brain::Wild).count();
     if alive >= config.wild_target || census.iter().count() >= config.max_organisms {
         return;
@@ -43,8 +74,16 @@ pub fn bot_mutation(
     config: Res<ServerConfig>,
     time: Res<Time>,
     mut bots: Query<(&mut OrganismState, &PlayerProgress, &mut BotState), With<Brain>>,
+    mut since: Local<f32>,
 ) {
-    let dt = time.delta_secs();
+    // Между решениями бота о росте проходят секунды: накапливаем время и
+    // раздаём его пачкой, чтобы таймеры шли ровно так же, как шли.
+    *since += time.delta_secs();
+    if *since < MUTATION_CHECK_INTERVAL {
+        return;
+    }
+    let dt = std::mem::take(&mut *since);
+
     let mut rng = rand::rng();
     for (mut organism, progress, mut bot) in &mut bots {
         bot.mutate_in -= dt;
@@ -81,37 +120,69 @@ pub fn bot_mutation(
     }
 }
 
-/// One steering pass: eat when hungry, hunt what you can beat, run from what you
-/// cannot, and wander when nothing is going on.
-pub fn bot_movement(
+/// Что бот решил в последний раз, когда смотрел вокруг.
+///
+/// Живёт в [`BotState`] между тиками: восприятие обновляет это поле десять раз
+/// в секунду, рулевое управление читает его каждый тик.
+#[derive(Clone, Copy, Default)]
+pub struct Perception {
+    /// Куда плыть: еда или жертва.
+    pub goal: Option<Vec3>,
+    /// Суммарное направление «прочь» от всех угроз, ноль — если бояться некого.
+    pub escape: Vec3,
+}
+
+/// Оценка обстановки: кого бояться, кого есть, куда плыть.
+///
+/// Работает на [`PERCEPTION_HZ`], а не на частоте тика. Фазы разнесены по ботам
+/// (см. `BotState::think_in` при рождении), иначе все семьдесят особей думают в
+/// один и тот же тик и вместо ровной нагрузки получается пила.
+pub fn bot_perception(
     config: Res<ServerConfig>,
     time: Res<Time>,
-    nutrients: Query<&FoodPosition, With<Nutrient>>,
+    food: Res<FoodGrid>,
     // One set: the snapshot of everyone, then the bots we actually steer. Both
     // touch PlayerPosition, so they cannot be two independent queries.
     mut sets: ParamSet<(
-        Query<(Entity, &PlayerPosition, &OrganismState, &PlayerGenome)>,
-        Query<(Entity, &Brain, &mut PlayerPosition, &OrganismState, &PlayerProgress, &mut BotState)>,
+        Query<(Entity, &PlayerPosition, &OrganismState)>,
+        Query<(Entity, &Brain, &PlayerPosition, &OrganismState, &PlayerProgress, &mut BotState)>,
     )>,
 ) {
     let dt = time.delta_secs();
-    let mut rng = rand::rng();
 
-    // The snapshot carries what an organism can judge by looking: how hard the
-    // other one hits, how well it takes a hit, and how much life is left in it.
-    let world: Vec<(Entity, Vec3, f32, f32, f32, Genome)> = sets
+    // Снимок несёт то, что видно со стороны: как сильно бьёт, как держит удар,
+    // сколько в нём жизни. Гистограмма семейств вместо клона генома — родство
+    // считается по ней.
+    let world: Vec<Neighbour> = sets
         .p0()
         .iter()
-        .map(|(e, p, s, g)| {
-            (e, p.0, attack_power_with(s, config.base_attack), defense(s), s.health, g.0.clone())
+        .map(|(entity, position, state)| Neighbour {
+            entity,
+            position: position.0,
+            attack: attack_power_with(state, config.base_attack),
+            defense: defense(state),
+            health: state.health,
+            families: state.families,
+            lineage: state.genome.lineage,
         })
         .collect();
-    let food: Vec<Vec3> = nutrients.iter().map(|p| p.0).collect();
 
-    for (entity, brain, mut position, organism, progress, mut bot) in &mut sets.p1() {
-        if progress.dead {
+    let vision_squared = config.bot_vision * config.bot_vision;
+
+    for (entity, brain, position, organism, progress, mut bot) in &mut sets.p1() {
+        bot.think_in -= dt;
+        if bot.think_in > 0.0 {
             continue;
         }
+        // Следующий раз — через период, но без накопленного долга: мёртвый бот
+        // не думает, и без `max` он бы отработал все пропущенные раздумья разом
+        // в тик после возвращения.
+        bot.think_in = (bot.think_in + PERCEPTION_PERIOD).max(0.0);
+        if progress.dead {
+            bot.perception = Perception::default();
+            continue;
+        }
+
         let here = position.0;
         let my_attack = attack_power_with(organism, config.base_attack);
         let my_defense = defense(organism);
@@ -124,49 +195,83 @@ pub fn bot_movement(
         let mut escape = Vec3::ZERO;
         let mut best_prey = f32::MAX;
 
-        for (other, other_pos, their_attack, their_defense, their_health, genome) in &world {
-            if *other == entity {
+        for other in &world {
+            if other.entity == entity {
                 continue;
             }
-            let distance = here.distance(*other_pos);
-            if distance > config.bot_vision
-                || !hostile_with(
-                    &organism.genome,
-                    genome,
+            // Дешёвая проверка первой: квадрат расстояния вместо корня, и только
+            // для тех, кто действительно в поле зрения, — сравнение родства.
+            let distance_squared = here.distance_squared(other.position);
+            if distance_squared > vision_squared
+                || !hostile_counts(
+                    &organism.families,
+                    organism.genome.lineage,
+                    &other.families,
+                    other.lineage,
                     config.aggression_threshold,
                     config.kin_split_threshold,
                 )
             {
                 continue;
             }
+            let distance = distance_squared.sqrt();
 
             // How long each of us would survive the other. This is the whole
             // judgement: not "who is bigger" but "who runs out of health first".
-            let incoming = (their_attack * (1.0 - my_defense)).max(0.01);
-            let outgoing = (my_attack * (1.0 - their_defense)).max(0.01);
+            let incoming = (other.attack * (1.0 - my_defense)).max(0.01);
+            let outgoing = (my_attack * (1.0 - other.defense)).max(0.01);
             let i_last = organism.health / incoming;
-            let they_last = their_health / outgoing;
+            let they_last = other.health / outgoing;
 
             let losing = i_last < they_last * 1.25;
             if losing || wounded {
                 // Closer threats pull harder, so a bot flees the nearest first.
-                escape += (here - *other_pos).normalize_or_zero() / distance.max(1.0);
+                escape += (here - other.position).normalize_or_zero() / distance.max(1.0);
             } else if *brain == Brain::Wild && distance < best_prey && they_last < i_last * 0.7 {
                 best_prey = distance;
-                goal = Some(*other_pos);
+                goal = Some(other.position);
             }
         }
 
         if goal.is_none() && hungry && escape == Vec3::ZERO {
-            let mut nearest = config.bot_vision;
-            for food_position in &food {
-                let distance = here.distance(*food_position);
-                if distance < nearest {
-                    nearest = distance;
-                    goal = Some(*food_position);
-                }
-            }
+            // Сетка вместо перебора всех девятисот частиц: поиск идёт кольцами
+            // от клетки бота и обрывается, как только ближе уже быть не может.
+            goal = food.nearest(here, config.bot_vision);
         }
+
+        bot.perception = Perception { goal, escape };
+    }
+}
+
+/// Всё, что бот может понять о соседе, просто посмотрев на него.
+struct Neighbour {
+    entity: Entity,
+    position: Vec3,
+    attack: f32,
+    defense: f32,
+    health: f32,
+    families: FamilyCounts,
+    lineage: u64,
+}
+
+/// Рулевое управление: превращает решение восприятия в шаг тела.
+///
+/// Работает каждый тик, потому что это и есть движение. Плетение, рывки в
+/// сторону и снос к центру арены считаются здесь, а не в восприятии, — иначе
+/// побег стал бы дёрганым в такт частоте раздумий.
+pub fn bot_movement(
+    time: Res<Time>,
+    mut bots: Query<(&mut PlayerPosition, &OrganismState, &PlayerProgress, &mut BotState)>,
+) {
+    let dt = time.delta_secs();
+    let mut rng = rand::rng();
+
+    for (mut position, organism, progress, mut bot) in &mut bots {
+        if progress.dead {
+            continue;
+        }
+        let here = position.0;
+        let Perception { goal, escape } = bot.perception;
 
         bot.retarget -= dt;
         if bot.retarget <= 0.0 {

@@ -130,7 +130,9 @@ pub fn setup_hud(mut commands: Commands, font: Res<UiFont>) {
             left: Val::Px(16.0),
             ..default()
         },
-        Text::new("WASD - плыть   Tab - мутации (200 шт)   Q/E - орган   1-0 - вырастить вариант"),
+        Text::new(
+            "WASD - плыть   Tab - мутации   Q/E - орган   1-0 - вырастить   F1 - отладка",
+        ),
         TextFont { font: FontSource::Handle(font.clone()), font_size: FontSize::Px(12.0), ..default() },
         TextColor(Color::srgba(0.74, 0.88, 0.90, 0.55)),
     ));
@@ -265,10 +267,15 @@ fn bar(panel: &mut ChildSpawnerCommands, kind: HudBar, color: Color) {
         });
 }
 
-type PlayerView<'a> = (&'a PlayerVitals, &'a PlayerEnvironment, &'a PlayerProgress, &'a PlayerGenome);
+/// Своё тело глазами интерфейса. Энергия отдельным компонентом: её носят только
+/// организмы игроков, поэтому здесь она `Option` — в первый тик после появления
+/// тела она может ещё не доехать.
+type PlayerView<'a> =
+    (&'a PlayerVitals, Option<&'a PlayerEnergy>, &'a PlayerProgress, &'a PlayerGenome);
 
 pub fn update_hud(
     server: Res<ServerAddress>,
+    water: Res<WorldUpdate>,
     connection: Query<(), (With<Client>, With<Connected>)>,
     player: Query<PlayerView, With<Controlled>>,
     everyone: Query<&PlayerGenome>,
@@ -301,23 +308,26 @@ pub fn update_hud(
                 }
             },
             HudLine::Vitals => match view {
-                Some((v, _, _, _)) => format!(
-                    "Энергия {:.0}/{:.0}   Здоровье {:.0}   Масса {:.1}",
-                    v.energy, v.energy_cap, v.health, v.mass
-                ),
+                Some((v, energy, _, _)) => {
+                    let (energy, cap) =
+                        energy.map(|e| (e.energy, e.cap)).unwrap_or((0.0, 0.0));
+                    format!(
+                        "Энергия {energy:.0}/{cap:.0}   Здоровье {:.0}   Масса {:.1}",
+                        v.health, v.mass
+                    )
+                }
                 None => "-".to_string(),
             },
-            HudLine::Environment => match view {
-                Some((_, e, _, _)) => format!(
-                    "{}\nT {:.2}   соль {:.2}   O2 {:.2}   яд {:.2}",
-                    e.season.name(),
-                    e.temperature,
-                    e.salinity,
-                    e.oxygen,
-                    e.toxin
-                ),
-                None => "-".to_string(),
-            },
+            // Вода — общая для всех и приходит сообщением, а не компонентом на
+            // каждом организме: рисуем её независимо от того, есть ли уже тело.
+            HudLine::Environment => format!(
+                "{}\nT {:.2}   соль {:.2}   O2 {:.2}   яд {:.2}",
+                water.season.name(),
+                water.temperature,
+                water.salinity,
+                water.oxygen,
+                water.toxin
+            ),
         };
         if text.0 != value {
             text.0 = value;
@@ -333,11 +343,11 @@ pub fn update_hud(
 
     for (mut node, kind) in &mut bars {
         let fill = match (view, kind) {
-            (Some((v, _, _, _)), HudBar::Energy) => {
-                (v.energy / v.energy_cap.max(1.0) * 100.0).clamp(0.0, 100.0)
+            (Some((_, Some(energy), _, _)), HudBar::Energy) => {
+                (energy.energy / energy.cap.max(1.0) * 100.0).clamp(0.0, 100.0)
             }
             (Some((v, _, _, _)), HudBar::Health) => v.health.clamp(0.0, 100.0),
-            (None, _) => 0.0,
+            _ => 0.0,
         };
         node.width = Val::Percent(fill);
     }

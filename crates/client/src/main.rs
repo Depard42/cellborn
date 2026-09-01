@@ -1,5 +1,6 @@
 mod atlas;
 mod body;
+mod debug;
 mod fx;
 mod menu;
 mod ui;
@@ -48,6 +49,9 @@ fn main() {
     app.add_plugins(ClientGamePlugin);
 
     app.insert_resource(ServerAddress(server_addr));
+    // Вода вокруг игрока приходит сообщением; до первого пакета интерфейс рисует
+    // значения по умолчанию, а не пустоту.
+    app.init_resource::<WorldUpdate>();
     app.init_resource::<ui::MutationSelection>();
     app.init_resource::<menu::WikiSelection>();
     app.init_resource::<atlas::AtlasSelection>();
@@ -67,6 +71,8 @@ fn main() {
     app.add_systems(Update, menu::game_escape.run_if(in_state(Screen::Game)));
     app.add_systems(Update, atlas::spin_preview);
     ui::install_font(&mut app);
+    // После установки шрифта: панель отладки собирается в `Startup` и просит его.
+    app.add_plugins(debug::plugin);
     app.add_systems(Startup, (setup_camera, world::setup_world, atlas::setup_preview));
     app.add_systems(OnEnter(Screen::Game), (ui::setup_hud, connect_client));
     app.add_systems(OnExit(Screen::Game), menu::despawn::<ui::GameUi>);

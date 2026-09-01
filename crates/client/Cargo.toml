@@ -5,7 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-bevy.workspace = true
+# Клиенту нужен весь движок: он и есть тот, ради кого набор по умолчанию собран.
+bevy = { workspace = true, features = ["default"] }
 serde.workspace = true
 rand.workspace = true
 tracing.workspace = true
