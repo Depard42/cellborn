@@ -42,28 +42,31 @@ def glow(draw, shape, color, width=0):
         draw.polygon(shape, fill=color + (235,), outline=light + (255,))
 
 
-def drop():
-    """Энергия: капля.
+def bolt():
+    """Энергия: молния.
 
-    Строится как окружность, радиус которой у вершины стягивается в ноль:
-    низ остаётся круглым, верх сходится в остриё. Наивная формула давала
-    кляксу — важно, чтобы сужение было резким только у самой макушки.
+    Капля читалась как вода, а не как запас сил, — и рядом с полоской, которая
+    убывает от голода, это сбивало. Молния говорит «заряд» без пояснений.
+
+    Рисуется с запасом по разрешению и уменьшается: у молнии острые углы, и на
+    64 пикселях в лоб они превращаются в лесенку.
     """
-    image = canvas()
-    d = ImageDraw.Draw(image)
-    points = []
-    for i in range(96):
-        # Угол от макушки: 0 — остриё, pi — донышко.
-        a = i / 95 * math.tau
-        # Ширина капли: у макушки ноль, к низу выходит на полный радиус.
-        width = math.sin(a / 2) ** 1.6
-        x = 32 + math.sin(a) * 19 * width
-        y = 10 + (1 - math.cos(a)) * 21
-        points.append((x, y))
-    glow(d, points, ENERGY)
-    # Блик: капля читается как жидкость только с ним.
-    d.ellipse((25, 36, 33, 46), fill=(255, 255, 255, 120))
-    return image
+    scale = 6
+    big = Image.new("RGBA", (SIZE * scale, SIZE * scale), (0, 0, 0, 0))
+    d = ImageDraw.Draw(big)
+    s = scale
+
+    # Классический зигзаг: верхняя половина уходит вправо, нижняя влево.
+    shape = [
+        (36, 6), (17, 34), (28, 34), (24, 58), (46, 27), (34, 27), (40, 6),
+    ]
+    points = [(x * s, y * s) for x, y in shape]
+    light = tuple(min(255, int(c * 1.4) + 30) for c in ENERGY)
+    d.polygon(points, fill=ENERGY + (240,), outline=light + (255,))
+    # Блик по верхней грани: без него молния выглядит плоской наклейкой.
+    d.line([points[0], points[1]], fill=(255, 255, 255, 150), width=int(1.6 * s))
+
+    return big.resize((SIZE, SIZE), Image.LANCZOS)
 
 
 def heart():
@@ -150,7 +153,7 @@ def skull():
 
 
 ICONS = {
-    "energy": drop,
+    "energy": bolt,
     "health": heart,
     "mass": weight,
     "points": star,
