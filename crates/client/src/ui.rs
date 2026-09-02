@@ -32,6 +32,10 @@ pub struct UiIcons {
     pub points: Handle<Image>,
     pub mutation: Handle<Image>,
     pub danger: Handle<Image>,
+    pub attack: Handle<Image>,
+    pub speed: Handle<Image>,
+    pub defense: Handle<Image>,
+    pub resist: Handle<Image>,
 }
 
 pub fn load_icons(mut commands: Commands, assets: Res<AssetServer>) {
@@ -42,6 +46,10 @@ pub fn load_icons(mut commands: Commands, assets: Res<AssetServer>) {
         points: assets.load("ui/points.png"),
         mutation: assets.load("ui/mutation.png"),
         danger: assets.load("ui/danger.png"),
+        attack: assets.load("ui/attack.png"),
+        speed: assets.load("ui/speed.png"),
+        defense: assets.load("ui/defense.png"),
+        resist: assets.load("ui/resist.png"),
     });
 }
 
@@ -78,6 +86,21 @@ pub enum HudLine {
     Status,
     Vitals,
     Environment,
+}
+
+/// Боевые и ходовые показатели тела — то, что игрок сравнивает с чужими.
+///
+/// Считаются на клиенте из генома: сервер их не присылает, потому что и не
+/// должен — это чистая функция от тела, и обе стороны считают её одинаково.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub enum HudStat {
+    Mass,
+    Attack,
+    Speed,
+    Defense,
+    /// Стойкости к среде одной строкой: их четыре, и по отдельности они
+    /// занимают больше места, чем значат.
+    Resist,
 }
 
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +145,8 @@ pub struct VariantCard {
 pub struct DeathOverlay;
 
 const PANEL: Color = Color::srgba(0.02, 0.07, 0.09, 0.80);
+/// Цифры показателей ярче подписей: на них смотрят чаще всего.
+const INK_STAT: Color = Color::srgb(0.93, 0.97, 0.96);
 const LABEL: Color = Color::srgb(0.74, 0.88, 0.90);
 
 pub fn setup_hud(mut commands: Commands, font: Res<UiFont>, icons: Res<UiIcons>) {
@@ -158,6 +183,56 @@ pub fn setup_hud(mut commands: Commands, font: Res<UiFont>, icons: Res<UiIcons>)
                 TextColor(LABEL),
                 HudLine::Vitals,
             ));
+
+            // Показатели тела: значок и число. Ряды по два, чтобы панель не
+            // вытягивалась в столбец на пол-экрана.
+            for row in [
+                [(HudStat::Mass, &icons.mass), (HudStat::Attack, &icons.attack)],
+                [(HudStat::Speed, &icons.speed), (HudStat::Defense, &icons.defense)],
+            ] {
+                panel
+                    .spawn(Node {
+                        column_gap: Val::Px(18.0),
+                        align_items: AlignItems::Center,
+                        ..default()
+                    })
+                    .with_children(|line| {
+                        for (stat, image) in row {
+                            line.spawn(Node { align_items: AlignItems::Center, ..default() })
+                                .with_children(|cell| {
+                                    cell.spawn(icon(image, 14.0));
+                                    cell.spawn((
+                                        stat,
+                                        Text::new("-"),
+                                        TextFont {
+                                            font: FontSource::Handle(font.clone()),
+                                            font_size: FontSize::Px(13.0),
+                                            ..default()
+                                        },
+                                        TextColor(INK_STAT),
+                                    ));
+                                });
+                        }
+                    });
+            }
+
+            // Стойкости отдельной строкой: их четыре, и рядом с ними важно
+            // видеть, что творится в воде прямо сейчас.
+            panel
+                .spawn(Node { align_items: AlignItems::Center, ..default() })
+                .with_children(|line| {
+                    line.spawn(icon(&icons.resist, 14.0));
+                    line.spawn((
+                        HudStat::Resist,
+                        Text::new("-"),
+                        TextFont {
+                            font: FontSource::Handle(font.clone()),
+                            font_size: FontSize::Px(12.0),
+                            ..default()
+                        },
+                        TextColor(LABEL),
+                    ));
+                });
             panel.spawn((
                 Text::new("-"),
                 TextFont { font: FontSource::Handle(font.clone()), font_size: FontSize::Px(13.0), ..default() },
@@ -337,6 +412,7 @@ fn bar(panel: &mut ChildSpawnerCommands, kind: HudBar, color: Color, image: &Han
 type PlayerView<'a> =
     (&'a PlayerVitals, Option<&'a PlayerEnergy>, &'a PlayerProgress, &'a PlayerGenome);
 
+#[allow(clippy::too_many_arguments)]
 pub fn update_hud(
     server: Res<ServerAddress>,
     water: Res<WorldUpdate>,
@@ -344,6 +420,7 @@ pub fn update_hud(
     player: Query<PlayerView, With<Controlled>>,
     everyone: Query<&PlayerGenome>,
     mut lines: Query<(&mut Text, &mut TextColor, &HudLine)>,
+    mut stats: Query<(&mut Text, &HudStat), Without<HudLine>>,
     mut bars: Query<(&mut Node, &HudBar)>,
 ) {
     let connected = !connection.is_empty();
@@ -386,8 +463,10 @@ pub fn update_hud(
             },
             // Вода — общая для всех и приходит сообщением, а не компонентом на
             // каждом организме: рисуем её независимо от того, есть ли уже тело.
+            // Вода как она есть. Рядом со строкой стойкостей это читается
+            // парой: «вот что снаружи, вот что я терплю».
             HudLine::Environment => format!(
-                "{}\nT {:.2}   соль {:.2}   O2 {:.2}   яд {:.2}",
+                "ВОДА: {}\nT {:.2}   соль {:.2}   O2 {:.2}   яд {:.2}",
                 water.season.name(),
                 water.temperature,
                 water.salinity,
@@ -404,6 +483,31 @@ pub fn update_hud(
             } else {
                 Color::srgb(0.95, 0.75, 0.35)
             };
+        }
+    }
+
+    // Показатели тела. Считаются здесь же из генома: это чистая функция от
+    // тела, и просить их у сервера значило бы гонять по сети то, что клиент
+    // умеет вычислить сам.
+    let body = view.map(|v| OrganismState::from_genome(v.3.0.clone()));
+    for (mut text, stat) in &mut stats {
+        let value = match (&body, stat) {
+            (Some(body), HudStat::Mass) => format!("{:.1}", body.mass),
+            (Some(body), HudStat::Attack) => format!("{:.1}/с", attack_power(body)),
+            (Some(body), HudStat::Speed) => format!("{:.1}", movement_speed(body)),
+            // Защита — доля поглощаемого урона, и в процентах она понятнее.
+            (Some(body), HudStat::Defense) => format!("{:.0}%", defense(body) * 100.0),
+            (Some(body), HudStat::Resist) => format!(
+                "T {:.2}   соль {:.2}   O2 {:+.2}   яд {:.2}",
+                body.temperature_tolerance,
+                body.salinity_tolerance,
+                body.oxygen_affinity,
+                body.toxin_resistance,
+            ),
+            (None, _) => "-".to_string(),
+        };
+        if text.0 != value {
+            text.0 = value;
         }
     }
 

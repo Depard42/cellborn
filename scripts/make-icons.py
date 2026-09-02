@@ -152,6 +152,128 @@ def skull():
     return image
 
 
+ATTACK = (240, 150, 120)
+SPEED = (150, 205, 245)
+DEFENSE = (185, 190, 205)
+RESIST = (170, 215, 175)
+
+
+def sharp(draw_on, points, color, scale):
+    """Заливка с более светлым контуром — общий приём для угловатых иконок."""
+    light = tuple(min(255, int(c * 1.4) + 30) for c in color)
+    draw_on.polygon(points, fill=color + (240,), outline=light + (255,))
+    del scale
+
+
+def big_canvas(scale):
+    """Холст с запасом по разрешению: острые углы иначе идут лесенкой."""
+    return Image.new("RGBA", (SIZE * scale, SIZE * scale), (0, 0, 0, 0))
+
+
+def claw():
+    """Атака: коготь из трёх изогнутых зубцов.
+
+    Прямой клык читался просто треугольником: у симметричной фигуры без изгиба
+    нет ничего, что говорило бы «оно рвёт». Изгиб и повтор — есть.
+    """
+    scale = 6
+    big = big_canvas(scale)
+    d = ImageDraw.Draw(big)
+    s = scale
+
+    light = tuple(min(255, int(c * 1.4) + 30) for c in ATTACK)
+    for index, (base_x, curve, length) in enumerate(
+        ((17, -7.0, 40.0), (32, 0.0, 47.0), (47, 7.0, 40.0))
+    ):
+        # Зубец: сужающаяся к концу дуга. Строим две стороны и замыкаем.
+        outer, inner = [], []
+        for i in range(24):
+            t = i / 23
+            # Кончик уходит вбок тем сильнее, чем дальше от середины когтя.
+            x = base_x + curve * t * t
+            y = 9 + t * length
+            half = (1.0 - t) ** 0.85 * 6.0
+            outer.append(((x + half) * s, y * s))
+            inner.append(((x - half) * s, y * s))
+        d.polygon(outer + inner[::-1], fill=ATTACK + (240,), outline=light + (255,))
+        if index == 1:
+            d.line(
+                [(32 * s, 14 * s), (32 * s, 48 * s)],
+                fill=(255, 255, 255, 130),
+                width=int(1.3 * s),
+            )
+
+    return big.resize((SIZE, SIZE), Image.LANCZOS)
+
+
+def fin():
+    """Скорость: плавник со следом.
+
+    Не стрелка: стрелка означает «направление», а нужно «быстро». Плавник с
+    полосами позади читается как движение и остаётся в теме моря.
+    """
+    scale = 6
+    big = big_canvas(scale)
+    d = ImageDraw.Draw(big)
+    s = scale
+    shape = [(46, 8), (52, 46), (20, 40), (34, 26)]
+    sharp(d, [(x * s, y * s) for x, y in shape], SPEED, s)
+    for i, y in enumerate((20, 30, 40)):
+        length = 16 - i * 3
+        d.line(
+            [(8 * s, y * s), ((8 + length) * s, y * s)],
+            fill=SPEED + (150,),
+            width=int(1.8 * s),
+        )
+    return big.resize((SIZE, SIZE), Image.LANCZOS)
+
+
+def shield():
+    """Защита: щит."""
+    scale = 6
+    big = big_canvas(scale)
+    d = ImageDraw.Draw(big)
+    s = scale
+    shape = [(32, 6), (52, 15), (49, 38), (32, 58), (15, 38), (12, 15)]
+    sharp(d, [(x * s, y * s) for x, y in shape], DEFENSE, s)
+    d.line(
+        [(32 * s, 14 * s), (32 * s, 48 * s)],
+        fill=(255, 255, 255, 110),
+        width=int(1.4 * s),
+    )
+    return big.resize((SIZE, SIZE), Image.LANCZOS)
+
+
+def leaf():
+    """Стойкость к среде: лист.
+
+    Приспособленность — это про то, чтобы жить в чужой воде, а не про броню.
+    Лист говорит «выживает здесь» лучше, чем ещё один щит.
+    """
+    scale = 6
+    big = big_canvas(scale)
+    d = ImageDraw.Draw(big)
+    s = scale
+    # Лист строится по половинкам: правая сверху вниз, левая обратно. Попытка
+    # задать его одним углом даёт две доли вместо одной — получается арахис.
+    right, left = [], []
+    for i in range(60):
+        # От макушки к кончику.
+        v = -1.0 + i / 59 * 2.0
+        y = 32 + v * 26
+        # Ширина: ноль на концах, максимум посередине, с наклоном к макушке.
+        half = math.cos(v * math.pi / 2) ** 0.75 * 17
+        right.append(((32 + half) * s, y * s))
+        left.append(((32 - half) * s, y * s))
+    sharp(d, right + left[::-1], RESIST, s)
+    d.line(
+        [(32 * s, 10 * s), (32 * s, 54 * s)],
+        fill=(255, 255, 255, 120),
+        width=int(1.3 * s),
+    )
+    return big.resize((SIZE, SIZE), Image.LANCZOS)
+
+
 ICONS = {
     "energy": bolt,
     "health": heart,
@@ -159,6 +281,10 @@ ICONS = {
     "points": star,
     "mutation": helix,
     "danger": skull,
+    "attack": claw,
+    "speed": fin,
+    "defense": shield,
+    "resist": leaf,
 }
 
 if __name__ == "__main__":
