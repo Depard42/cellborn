@@ -276,7 +276,7 @@ pub fn step_movement(position: &mut Vec3, direction: &Direction, speed: f32, dt:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Genome, PartFamily, PartKind, AGGRESSION_THRESHOLD, KIN_SPLIT_THRESHOLD};
+    use crate::{Genome, PartFamily, PartKind, Perk, AGGRESSION_THRESHOLD, KIN_SPLIT_THRESHOLD};
 
     /// Вода биома — теперь это просто его вода, без всякого времени.
     fn env_for(biome: Biome) -> Environment {
