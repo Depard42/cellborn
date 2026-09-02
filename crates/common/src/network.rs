@@ -16,7 +16,13 @@ pub const SEND_INTERVAL: Duration = Duration::from_millis(20);
 pub const SERVER_PORT: u16 = 5555;
 
 /// Identifies this game (and its protocol version) during the netcode handshake.
-pub const PROTOCOL_ID: u64 = 0x0C_E1_1B_02;
+///
+/// Поднимается, когда меняется то, чем стороны обмениваются. В 0.4.0 сменилось
+/// почти всё: геном (четыре уровня вместо десяти вариантов), состав органов,
+/// сезоны стали биомами, добавились способности. Старый клиент понял бы новый
+/// сервер неправильно, а не отказался бы — поэтому пусть отказывается честно,
+/// на рукопожатии.
+pub const PROTOCOL_ID: u64 = 0x0C_E1_1B_04;
 
 /// Prototype-only key: a real deployment must keep this secret on the server and
 /// hand out connect tokens from a backend instead.
