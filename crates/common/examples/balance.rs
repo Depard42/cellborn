@@ -10,18 +10,9 @@
 use bevy::prelude::*;
 use cellborn_common::*;
 
-/// Среда в разгаре сезона, а не в его первую секунду.
-///
-/// Часть давлений нарастает по ходу сезона — солёность в жару, температура в
-/// цветение. Замер на нулевой фазе показывал бы самый мягкий момент и врал бы о
-/// том, ради чего органы вообще растят.
-fn env_for(season: Season) -> Environment {
-    let mut env = Environment::default();
-    env.season = season;
-    // Восемь десятых сезона: пик давления, но ещё не смена.
-    env.time_in_season = env.season_length * 0.8;
-    env.advance(0.0);
-    env
+/// Вода биома. Времени больше нет — вода это свойство места.
+fn env_for(biome: Biome) -> Environment {
+    biome.water()
 }
 
 /// Организм со стартовым телом плюс перечисленные органы.
@@ -45,7 +36,7 @@ fn fresh_cloud() -> ToxinCloud {
 
 /// Сколько секунд организм проживёт на полном запасе, если не будет есть.
 fn starve_seconds(organism: &OrganismState, env: &Environment) -> f32 {
-    let drain = energy_drain(organism, env) - photosynthesis_gain(organism, env);
+    let drain = energy_drain(organism, env) - photosynthesis_gain(organism, Biome::Open);
     if drain <= 0.0 {
         return f32::INFINITY;
     }
@@ -66,10 +57,10 @@ fn main() {
     });
 
     println!(
-        "{:<8} {:>9} {:>9} {:>9} {:>9} {:>9}",
-        "сезон", "фон", "расход", "+1 обл.", "+3 обл.", "штраф%"
+        "{:<20} {:>9} {:>9} {:>9} {:>9} {:>9}",
+        "биом", "фон", "расход", "+1 обл.", "+3 обл.", "штраф%"
     );
-    for season in [Season::Bloom, Season::Hot, Season::Storm, Season::Cold] {
+    for season in Biome::ALL {
         let env = env_for(season);
         let clean = energy_drain(&plain, &env);
 
@@ -82,7 +73,7 @@ fn main() {
         let share = adaptation_penalty(&plain, &three) / 3.0 * 100.0;
 
         println!(
-            "{:<8} {:>9.3} {:>9.3} {:>9.3} {:>9.3} {:>8.0}%",
+            "{:<20} {:>9.3} {:>9.3} {:>9.3} {:>9.3} {:>8.0}%",
             season.name(),
             env.toxin_level,
             clean,
@@ -93,15 +84,15 @@ fn main() {
     }
 
     println!("\nСколько живёт голодающий (секунд, полный запас энергии):\n");
-    println!("{:<8} {:>10} {:>10} {:>10}", "сезон", "чисто", "+1 обл.", "+3 обл.");
-    for season in [Season::Bloom, Season::Hot, Season::Storm, Season::Cold] {
+    println!("{:<20} {:>10} {:>10} {:>10}", "сезон", "чисто", "+1 обл.", "+3 обл.");
+    for season in Biome::ALL {
         let env = env_for(season);
         let mut one = env.clone();
         one.toxin_level += at_centre;
         let mut three = env.clone();
         three.toxin_level += at_centre * 3.0;
         println!(
-            "{:<8} {:>10.0} {:>10.0} {:>10.0}",
+            "{:<20} {:>10.0} {:>10.0} {:>10.0}",
             season.name(),
             starve_seconds(&plain, &env),
             starve_seconds(&plain, &one),
@@ -114,7 +105,7 @@ fn main() {
     println!("расход энергии; здоровье падает только когда энергия дошла до нуля.");
     println!("То есть сытый организм в облаке просто ест чуть чаще.\n");
 
-    let env = env_for(Season::Storm);
+    let env = env_for(Biome::Vents);
     let mut poisoned = env.clone();
     poisoned.toxin_level += at_centre * 3.0;
     let extra = energy_drain(&plain, &poisoned) - energy_drain(&plain, &env);
@@ -159,7 +150,7 @@ fn main() {
         ("слизь", PartFamily::MucusCoat),
     ];
     print!("{:<16}", "орган");
-    for season in [Season::Bloom, Season::Hot, Season::Storm, Season::Cold] {
+    for season in Biome::ALL {
         print!("{:>10}", season.name());
     }
     println!("   (выигрыш расхода, + значит дешевле)");
@@ -169,7 +160,7 @@ fn main() {
         let parts: Vec<PartKind> = (0..count).map(|_| PartKind::basic(*family)).collect();
         let adapted = body(&parts);
         print!("{name:<16}");
-        for season in [Season::Bloom, Season::Hot, Season::Storm, Season::Cold] {
+        for season in Biome::ALL {
             let env = env_for(season);
             let saved = energy_drain(&plain, &env) - energy_drain(&adapted, &env);
             print!("{saved:>10.3}");
@@ -179,7 +170,7 @@ fn main() {
 
     println!("\nИ то же в долях: во сколько раз дольше живёт голодающий с органом.\n");
     print!("{:<16}", "орган");
-    for season in [Season::Bloom, Season::Hot, Season::Storm, Season::Cold] {
+    for season in Biome::ALL {
         print!("{:>10}", season.name());
     }
     println!();
@@ -188,7 +179,7 @@ fn main() {
         let parts: Vec<PartKind> = (0..count).map(|_| PartKind::basic(*family)).collect();
         let adapted = body(&parts);
         print!("{name:<16}");
-        for season in [Season::Bloom, Season::Hot, Season::Storm, Season::Cold] {
+        for season in Biome::ALL {
             let env = env_for(season);
             let ratio = starve_seconds(&adapted, &env) / starve_seconds(&plain, &env);
             print!("{ratio:>10.2}");
@@ -198,11 +189,11 @@ fn main() {
 
     println!("\nШтраф адаптации зажат потолком {:.1}. Сколько его съедает сам сезон,", 3.0);
     println!("до всяких облаков:\n");
-    for season in [Season::Bloom, Season::Hot, Season::Storm, Season::Cold] {
+    for season in Biome::ALL {
         let env = env_for(season);
         let penalty = adaptation_penalty(&plain, &env);
         println!(
-            "  {:<8} штраф {:.2} из 3.00 ({:.0}% потолка), из них база {:.2}",
+            "  {:<20} штраф {:.2} из 3.00 ({:.0}% потолка), из них база {:.2}",
             season.name(),
             penalty,
             penalty / 3.0 * 100.0,

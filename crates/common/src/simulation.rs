@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 use crate::balance::*;
-use crate::{stats, Direction, Environment, OrganismState, PartFamily, PartKind, PartLevel, Season, BASE_MASS};
+use crate::{stats, Biome, Direction, Environment, OrganismState, PartFamily, PartKind, PartLevel, BASE_MASS};
 
 /// Half-size of the playable area on the X/Z axes.
 pub const ARENA_HALF_EXTENT: f32 = 70.0;
@@ -80,21 +80,13 @@ pub fn energy_drain(organism: &OrganismState, env: &Environment) -> f32 {
     energy_drain_with(organism, env, BASE_UPKEEP, PENALTY_UPKEEP)
 }
 
-/// How much light reaches the organism this season.
-pub fn season_light(season: Season) -> f32 {
-    match season {
-        Season::Bloom => 0.95,
-        Season::Hot => 0.70,
-        Season::Storm => 0.20,
-        Season::Cold => 0.45,
-    }
-}
-
-/// Energy per second produced from light. Not a flat constant, so photosynthesis
-/// is a seasonal strategy rather than an on/off immortality switch.
-pub fn photosynthesis_gain(organism: &OrganismState, env: &Environment) -> f32 {
+/// Energy per second produced from light.
+///
+/// Свет зависит от места, а не от времени: на отмели его вдоволь, в бездне
+/// почти нет. Фотосинтез из-за этого — выбор биома, а не бесплатное бессмертие.
+pub fn photosynthesis_gain(organism: &OrganismState, biome: Biome) -> f32 {
     let rate: f32 = organism.genome.parts.iter().map(|p| stats(p.kind).photosynthesis).sum();
-    rate * season_light(env.season)
+    rate * biome.light()
 }
 
 /// Сколько здоровья у тела такой массы.
@@ -286,12 +278,9 @@ mod tests {
     use super::*;
     use crate::{Genome, PartFamily, PartKind, AGGRESSION_THRESHOLD, KIN_SPLIT_THRESHOLD};
 
-    fn env_for(season: Season) -> Environment {
-        let mut env = Environment::default();
-        env.season = season;
-        // Advance by zero to let the season's values be applied.
-        env.advance(0.0);
-        env
+    /// Вода биома — теперь это просто его вода, без всякого времени.
+    fn env_for(biome: Biome) -> Environment {
+        biome.water()
     }
 
     /// Guards the headline balance numbers: a starving organism should live for
@@ -299,13 +288,13 @@ mod tests {
     #[test]
     fn starvation_lifetime_is_within_design_range() {
         let organism = OrganismState::default();
-        for season in [Season::Bloom, Season::Hot, Season::Storm, Season::Cold] {
+        for season in Biome::ALL {
             let env = env_for(season);
             let drain = energy_drain(&organism, &env);
             let lifetime = organism.energy_cap() / drain;
             assert!(
                 (45.0..=260.0).contains(&lifetime),
-                "{season:?}: lifetime {lifetime:.0}s out of range (drain {drain:.3}/s)"
+                "{season:?}: жизнь {lifetime:.0}s out of range (drain {drain:.3}/s)"
             );
         }
     }
@@ -314,8 +303,8 @@ mod tests {
     /// должна снимать его целиком, а не экономить копейки. Иначе орган снова
     /// станет украшением, каким был осморегулятор.
     #[test]
-    fn one_gill_is_enough_to_stop_choking_in_a_storm() {
-        let storm = env_for(Season::Storm);
+    fn one_gill_is_enough_to_stop_choking_in_the_vents() {
+        let storm = env_for(Biome::Vents);
         let bare = OrganismState::default();
         let choking = suffocation(&bare, &storm);
         assert!(choking > 0.0, "в шторм голое тело обязано задыхаться");
@@ -330,8 +319,8 @@ mod tests {
         let adapted = OrganismState::from_genome(genome);
         assert_eq!(suffocation(&adapted, &storm), 0.0, "жабра не спасла от удушья");
 
-        // В остальных сезонах задыхаться не с чего.
-        for season in [Season::Bloom, Season::Hot, Season::Cold] {
+        // В остальных биомах задыхаться не с чего.
+        for season in [Biome::Open, Biome::Shallows, Biome::Brine, Biome::Abyss] {
             assert_eq!(
                 suffocation(&bare, &env_for(season)),
                 0.0,
@@ -358,13 +347,10 @@ mod tests {
             genome.push_part(PartKind::basic(family));
             let adapted = OrganismState::from_genome(genome);
 
-            let best = [Season::Bloom, Season::Hot, Season::Storm, Season::Cold]
+            let best = Biome::ALL
                 .into_iter()
-                .map(|season| {
-                    // Худший момент сезона: часть давлений нарастает к концу.
-                    let mut env = env_for(season);
-                    env.time_in_season = env.season_length * 0.9;
-                    env.advance(0.0);
+                .map(|biome| {
+                    let env = env_for(biome);
                     energy_drain(&bare, &env) - energy_drain(&adapted, &env)
                 })
                 .fold(f32::MIN, f32::max);
@@ -380,7 +366,7 @@ mod tests {
     /// Adaptation must be worth its upkeep: a gill has to help in Storm.
     #[test]
     fn gills_help_in_storm() {
-        let env = env_for(Season::Storm);
+        let env = env_for(Biome::Vents);
         let plain = OrganismState::default();
         let mut genome = Genome::starter();
         genome.push_part(PartKind::basic(PartFamily::Gill));

@@ -63,7 +63,7 @@ pub struct CloudPuff {
     pub phase: f32,
 }
 
-/// Look of one season.
+/// Как выглядит вода одного биома.
 #[derive(Clone, Copy)]
 pub struct Palette {
     pub water: Color,
@@ -75,52 +75,86 @@ pub struct Palette {
     pub sun_dir: Vec3,
 }
 
-pub fn palette(season: Season) -> Palette {
-    match season {
-        // Green, rich, alive: light comes straight down through a plankton haze.
-        Season::Bloom => Palette {
-            water: Color::srgb(0.045, 0.20, 0.19),
+pub fn palette(biome: Biome) -> Palette {
+    match biome {
+        // Открытое море: спокойный сине-зелёный, ничем не примечательный. Он и
+        // должен быть никаким — на его фоне всё остальное читается как «другое».
+        Biome::Open => Palette {
+            water: Color::srgb(0.035, 0.13, 0.17),
             fog_density: 0.030,
-            ambient: Color::srgb(0.55, 0.90, 0.75),
-            ambient_strength: 220.0,
-            sun: Color::srgb(0.85, 1.0, 0.85),
-            sun_lux: 11000.0,
+            ambient: Color::srgb(0.55, 0.80, 0.85),
+            ambient_strength: 190.0,
+            sun: Color::srgb(0.85, 0.95, 1.0),
+            sun_lux: 9000.0,
             sun_dir: Vec3::new(0.25, -1.0, 0.3),
         },
-        // Warm, murky, close: visibility drops and everything turns brassy.
-        Season::Hot => Palette {
-            water: Color::srgb(0.13, 0.15, 0.09),
-            fog_density: 0.055,
-            ambient: Color::srgb(0.95, 0.80, 0.50),
-            ambient_strength: 190.0,
-            sun: Color::srgb(1.0, 0.85, 0.55),
+        // Отмель: зелень, свет, видно далеко. Здесь начинают, и это должно
+        // выглядеть приветливо.
+        Biome::Shallows => Palette {
+            water: Color::srgb(0.05, 0.22, 0.19),
+            fog_density: 0.020,
+            ambient: Color::srgb(0.60, 0.95, 0.75),
+            ambient_strength: 240.0,
+            sun: Color::srgb(0.90, 1.0, 0.85),
             sun_lux: 13000.0,
+            sun_dir: Vec3::new(0.2, -1.0, 0.25),
+        },
+        // Соляная впадина: жёлтая муть, рассол.
+        Biome::Brine => Palette {
+            water: Color::srgb(0.16, 0.14, 0.06),
+            fog_density: 0.055,
+            ambient: Color::srgb(0.95, 0.85, 0.50),
+            ambient_strength: 170.0,
+            sun: Color::srgb(1.0, 0.88, 0.55),
+            sun_lux: 8000.0,
             sun_dir: Vec3::new(0.6, -1.0, 0.1),
         },
-        // Dark and violent: almost no light, heavy silt.
-        Season::Storm => Palette {
-            water: Color::srgb(0.035, 0.055, 0.085),
-            fog_density: 0.080,
-            ambient: Color::srgb(0.35, 0.45, 0.60),
-            ambient_strength: 110.0,
-            sun: Color::srgb(0.55, 0.65, 0.85),
-            sun_lux: 4000.0,
-            sun_dir: Vec3::new(-0.5, -1.0, -0.4),
-        },
-        // Deep blue, crisp and empty: long sight lines, low ambient.
-        Season::Cold => Palette {
-            water: Color::srgb(0.03, 0.09, 0.17),
-            fog_density: 0.022,
-            ambient: Color::srgb(0.45, 0.65, 0.95),
+        // Термальный разлом: багровый жар, видно на два шага.
+        Biome::Vents => Palette {
+            water: Color::srgb(0.14, 0.045, 0.035),
+            fog_density: 0.085,
+            ambient: Color::srgb(1.0, 0.55, 0.40),
             ambient_strength: 150.0,
-            sun: Color::srgb(0.70, 0.85, 1.0),
-            sun_lux: 8000.0,
+            sun: Color::srgb(1.0, 0.60, 0.45),
+            sun_lux: 5000.0,
+            sun_dir: Vec3::new(-0.4, -1.0, -0.3),
+        },
+        // Ледяная бездна: глубокая синева, прозрачно и пусто.
+        Biome::Abyss => Palette {
+            water: Color::srgb(0.02, 0.06, 0.16),
+            fog_density: 0.016,
+            ambient: Color::srgb(0.45, 0.62, 1.0),
+            ambient_strength: 120.0,
+            sun: Color::srgb(0.65, 0.80, 1.0),
+            sun_lux: 5500.0,
             sun_dir: Vec3::new(-0.2, -1.0, 0.5),
         },
     }
 }
 
-// --- procedural terrain ------------------------------------------------------
+/// Смешивает палитру биома с нейтральной по тому, насколько тело к ней
+/// приспособлено.
+///
+/// **Своя вода выглядит обычной, чужая — кричащей.** Это не украшение, а
+/// единственный способ понять «мне здесь плохо» раньше, чем начнёт убывать
+/// полоска: цвет говорит о теле, а не о месте, и один и тот же разлом выглядит
+/// по-разному для того, кто отрастил жабры, и для того, кто нет.
+pub fn palette_for(biome: Biome, hardship: f32) -> Palette {
+    let raw = palette(biome);
+    let calm = palette(Biome::Open);
+    // Ноль штрафа — почти нейтрально, потолок шкалы — полный цвет биома.
+    let k = (hardship / 2.0).clamp(0.0, 1.0);
+    Palette {
+        water: mix(calm.water, raw.water, k),
+        fog_density: calm.fog_density + (raw.fog_density - calm.fog_density) * k,
+        ambient: mix(calm.ambient, raw.ambient, k),
+        ambient_strength: calm.ambient_strength
+            + (raw.ambient_strength - calm.ambient_strength) * k,
+        sun: mix(calm.sun, raw.sun, k),
+        sun_lux: calm.sun_lux + (raw.sun_lux - calm.sun_lux) * k,
+        sun_dir: raw.sun_dir,
+    }
+}
 
 fn hash2(x: i32, z: i32) -> f32 {
     let mut n = x.wrapping_mul(374_761_393).wrapping_add(z.wrapping_mul(668_265_263));
@@ -189,7 +223,7 @@ pub fn setup_world(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let p = palette(Season::Bloom);
+    let p = palette(Biome::Open);
 
     commands.insert_resource(ClearColor(p.water));
     commands.insert_resource(GlobalAmbientLight {
@@ -453,7 +487,16 @@ pub fn apply_season(
     mut sun: Query<(&mut DirectionalLight, &mut Transform)>,
     mut fog: Query<&mut DistanceFog>,
 ) {
-    let target = palette(water.season);
+    // Насколько тело мучается в этой воде. Ноль — вода своя, и цвет почти
+    // нейтральный; чем хуже приспособлен, тем резче биом бьёт в глаза.
+    let hardship = player
+        .single()
+        .map(|genome| {
+            let body = OrganismState::from_genome(genome.0.clone());
+            (adaptation_penalty(&body, &water.biome.water()) - BASE_PENALTY).max(0.0)
+        })
+        .unwrap_or(0.0);
+    let target = palette_for(water.biome, hardship);
     let k = (time.delta_secs() * 0.6).min(1.0);
 
     clear.0 = mix(clear.0, target.water, k);

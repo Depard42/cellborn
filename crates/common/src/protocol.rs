@@ -77,7 +77,7 @@ pub struct PlayerProgress {
 /// На клиенте последнее принятое значение лежит ресурсом того же типа.
 #[derive(Resource, Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub struct WorldUpdate {
-    pub season: crate::Season,
+    pub biome: crate::Biome,
     pub temperature: f32,
     pub salinity: f32,
     pub oxygen: f32,
@@ -95,7 +95,7 @@ pub struct WorldUpdate {
 impl Default for WorldUpdate {
     fn default() -> Self {
         Self {
-            season: crate::Season::Bloom,
+            biome: crate::Biome::Open,
             temperature: 0.5,
             salinity: 0.5,
             oxygen: 0.8,

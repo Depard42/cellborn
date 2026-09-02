@@ -301,7 +301,7 @@ fn mark_controlled(trigger: On<Add, Controlled>, mut commands: Commands) {
 }
 
 fn setup_camera(mut commands: Commands) {
-    let p = palette(Season::Bloom);
+    let p = palette(Biome::Open);
     commands.spawn((
         MainCamera,
         Camera3d::default(),

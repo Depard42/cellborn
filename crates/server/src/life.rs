@@ -338,7 +338,6 @@ const CLOUD_EPSILON: f32 = 0.01;
 
 pub fn survival(
     config: Res<ServerConfig>,
-    env: Res<Environment>,
     time: Res<Time>,
     clouds: Query<&ToxinCloud>,
     field: Res<PollutionField>,
@@ -360,13 +359,17 @@ pub fn survival(
         let here = clouds.iter().map(|c| c.toxin_at(position.0)).sum::<f32>()
             + field.at(position.0) * POLLUTION_MAX_TOXIN;
 
-        let mut local = env.clone();
+        // Вода того места, где тело сейчас. Биом определяется по позиции и
+        // считается одинаково сервером и клиентом, поэтому карту биомов не
+        // надо ни хранить, ни пересылать.
+        let biome = Biome::at(position.0);
+        let mut local = biome.water();
         local.toxin_level += here;
 
         let cap = organism.energy_cap();
         let drain =
             energy_drain_with(&organism, &local, config.base_upkeep, config.penalty_upkeep);
-        let gain = photosynthesis_gain(&organism, &local);
+        let gain = photosynthesis_gain(&organism, biome);
         organism.energy = (organism.energy + (gain - drain) * dt).clamp(0.0, cap);
 
         organism.combat_timer = (organism.combat_timer - dt).max(0.0);
@@ -551,7 +554,6 @@ pub fn divide(
 pub fn deaths(
     mut commands: Commands,
     config: Res<ServerConfig>,
-    env: Res<Environment>,
     mut query: Query<(
         Entity,
         &PlayerPosition,
@@ -585,9 +587,14 @@ pub fn deaths(
                 "убит"
             } else if organism.energy <= 0.0 {
                 "голод"
-            // Причина смерти по состоянию воды вокруг: удушье накрывает всю
-            // арену, поэтому сезонного фона для него достаточно.
-            } else if suffocation_with(organism, &env, config.suffocation_damage) > 0.0 {
+            // Причина смерти по воде того места, где тело лежит: удушье
+            // теперь свойство биома, а не всего моря.
+            } else if suffocation_with(
+                organism,
+                &Biome::water_at(position.0),
+                config.suffocation_damage,
+            ) > 0.0
+            {
                 "задохнулся"
             } else {
                 "отравлен"

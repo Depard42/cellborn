@@ -45,24 +45,25 @@ fn bind_addr(port: u16) -> std::net::SocketAddr {
 #[derive(Resource, Default)]
 struct RequestCooldowns(HashMap<Entity, f32>);
 
-/// Remembers the season we last saw, to award points exactly once per change.
-#[derive(Resource)]
-struct SeasonWatch(Season);
+/// Накопленное время жизни в тяжёлой воде — для награды за приспособленность.
+///
+/// Раньше очки давали за пережитую смену сезона. Сезонов больше нет, а награда
+/// за выживание нужна: без неё единственный источник очков — еда, и тело,
+/// сумевшее поселиться там, где другие не живут, не получает за это ничего.
+#[derive(Resource, Default)]
+struct HardshipClock(f32);
 
 struct ServerGamePlugin;
 impl Plugin for ServerGamePlugin {
     fn build(&self, app: &mut App) {
         let config = config::load();
-        // The season length is a world setting, so it comes from the config too.
-        let environment = Environment { season_length: config.season_length, ..Default::default() };
         app.insert_resource(config);
-        app.insert_resource(environment);
         app.insert_resource(ReplicationMetadata::new(SEND_INTERVAL));
         app.init_resource::<RequestCooldowns>();
         app.init_resource::<FoodGrid>();
         app.init_resource::<TickClock>();
         app.init_resource::<PollutionField>();
-        app.insert_resource(SeasonWatch(Season::Bloom));
+        app.init_resource::<HardshipClock>();
         app.insert_resource(discovery::open(app.world().resource::<ServerConfig>()));
         app.add_systems(Startup, start_server);
         // Порядок несущий: движение → расталкивание → еда → бой. Тело сначала
@@ -80,7 +81,7 @@ impl Plugin for ServerGamePlugin {
                 // Кто где оказался.
                 (
                     metrics::tick_begin,
-                    advance_environment,
+                    reward_hardship,
                     rebuild_food_grid,
                     ai::bot_perception,
                     ai::bot_movement,
@@ -196,25 +197,49 @@ fn on_connected(
     info!("Organism spawned for {:?} (lineage {lineage:x})", remote.0);
 }
 
-fn advance_environment(
+/// Награда за жизнь в тяжёлой воде.
+///
+/// Очки идут не всем подряд и не по таймеру мира, а тем, кто **сейчас** платит
+/// среде и всё ещё жив. Это единственная награда, которую нельзя получить,
+/// просто подбирая корм: чтобы её получать, надо суметь поселиться там, где
+/// другие не живут.
+///
+/// Считается пачкой раз в несколько секунд: начислять по чуть-чуть каждый тик
+/// значило бы гонять запрос по всем организмам шестьдесят четыре раза в секунду
+/// ради дробей, которые всё равно копятся в целое.
+fn reward_hardship(
     config: Res<ServerConfig>,
-    mut env: ResMut<Environment>,
     time: Res<Time>,
-    mut watch: ResMut<SeasonWatch>,
-    mut organisms: Query<&mut OrganismState>,
+    mut clock: ResMut<HardshipClock>,
+    mut organisms: Query<(&PlayerPosition, &mut OrganismState, &PlayerProgress)>,
 ) {
-    env.advance(time.delta_secs());
-    if env.season != watch.0 {
-        watch.0 = env.season;
-        // Surviving a season change is worth points: it is the one reward that
-        // makes the seasonal system matter strategically.
-        for mut organism in &mut organisms {
-            organism.genome.mutation_points =
-                organism.genome.mutation_points.saturating_add(config.points_per_season);
+    clock.0 += time.delta_secs();
+    if clock.0 < HARDSHIP_INTERVAL {
+        return;
+    }
+    clock.0 = 0.0;
+
+    for (position, mut organism, progress) in &mut organisms {
+        if progress.dead {
+            continue;
         }
-        info!("Season is now {}", env.season.name());
+        let water = Biome::water_at(position.0);
+        // Платит ли тело за эту воду прямо сейчас. Базовый штраф есть у всех и
+        // ничего не значит, поэтому смотрим на превышение над ним.
+        let hardship = adaptation_penalty(&organism, &water) - BASE_PENALTY;
+        if hardship <= 0.05 {
+            continue;
+        }
+        // Чем тяжелее вода, тем больше очков, но не безгранично: три единицы
+        // штрафа — это потолок самой шкалы.
+        let earned = (config.points_per_season as f32 * hardship).round() as u16;
+        organism.genome.mutation_points =
+            organism.genome.mutation_points.saturating_add(earned.max(1));
     }
 }
+
+/// Раз во сколько секунд начисляется награда за тяжёлую воду.
+const HARDSHIP_INTERVAL: f32 = 10.0;
 
 fn movement(
     host_server: Query<(), With<HostServer>>,
@@ -294,17 +319,26 @@ fn feeding(
 }
 
 /// Keeps the live nutrient count near the target the season asks for.
+/// Средняя плотность еды по биомам и плотность самого богатого из них.
+///
+/// Первое задаёт, сколько всего частиц держать в море, второе — насколько
+/// вероятно, что частица появится в конкретной воде.
+const AVERAGE_FOOD_DENSITY: f32 = 1.25;
+const RICHEST_FOOD_DENSITY: f32 = 2.40;
+
 fn spawn_food(
     mut commands: Commands,
     config: Res<ServerConfig>,
-    env: Res<Environment>,
     time: Res<Time>,
     grid: Res<FoodGrid>,
     feasts: Query<&Feast>,
     mut budget: Local<f32>,
 ) {
     // Сколько еды в воде, сетка уже знает: она пересобрана в начале тика.
-    let target = (config.food_target as f32 * env.food_density) as usize;
+    // Сколько еды держать в море: базовое число, помноженное на среднюю
+    // плотность биомов. Сама раскладка по местам решается ниже — частица
+    // рождается там, где её биом гуще.
+    let target = (config.food_target as f32 * AVERAGE_FOOD_DENSITY) as usize;
     let live = grid.len();
     if live >= target {
         *budget = 0.0;
@@ -313,14 +347,32 @@ fn spawn_food(
     *budget += config.food_spawn_rate * time.delta_secs();
     let mut rng = rand::rng();
     let spots: Vec<Feast> = feasts.iter().copied().collect();
-    let weights: Vec<(FoodKind, f32)> = [FoodKind::Plankton, FoodKind::Algae, FoodKind::Detritus]
-        .into_iter()
-        .map(|k| (k, k.weight(env.season)))
-        .collect();
-    let total: f32 = weights.iter().map(|(_, w)| w).sum();
 
     while *budget >= 1.0 && live + (*budget as usize) < target + 8 {
         *budget -= 1.0;
+
+        // Сначала МЕСТО, потом вид: и густота, и состав пищи зависят от биома,
+        // так что решать, чем будет частица, можно только зная, где она.
+        //
+        // Cluster food instead of spreading it evenly: clusters are worth
+        // swimming to. Большая часть достаётся лакомым местам — ради них они и
+        // существуют.
+        let cluster = hazards::feeding_spot(&spots, &mut rng);
+        let biome = Biome::at(cluster);
+
+        // Отказ по плотности: в бедной воде частица чаще всего не появляется
+        // вовсе, в богатой появляется почти всегда. Так биом виден глазами —
+        // еда лежит не ровным слоем, а пятнами по карте.
+        if rng.random::<f32>() > biome.water().food_density / RICHEST_FOOD_DENSITY {
+            continue;
+        }
+
+        let weights: Vec<(FoodKind, f32)> =
+            [FoodKind::Plankton, FoodKind::Algae, FoodKind::Detritus]
+                .into_iter()
+                .map(|k| (k, k.weight(biome)))
+                .collect();
+        let total: f32 = weights.iter().map(|(_, w)| w).sum();
         let mut roll = rng.random_range(0.0..total);
         let mut kind = FoodKind::Plankton;
         for (k, w) in &weights {
@@ -330,9 +382,6 @@ fn spawn_food(
             }
             roll -= w;
         }
-        // Cluster food instead of spreading it evenly: clusters are worth swimming to.
-        // Большая часть достаётся лакомым местам — ради них они и существуют.
-        let cluster = hazards::feeding_spot(&spots, &mut rng);
         let jitter = Vec3::new(
             rng.random_range(-2.5..2.5),
             rng.random_range(-0.4..0.9),
@@ -488,7 +537,6 @@ const STATS_INTERVAL: f32 = 0.5;
 fn broadcast_state(
     time: Res<Time>,
     config: Res<ServerConfig>,
-    env: Res<Environment>,
     clock: Res<TickClock>,
     grid: Res<FoodGrid>,
     clouds: Query<&ToxinCloud>,
@@ -534,20 +582,24 @@ fn broadcast_state(
         if send_world {
             // The reported toxin level is the local one, clouds included: the HUD
             // should show the water the organism is actually in.
-            let local_toxin = organisms
-                .iter()
-                .find(|(id, _)| id.0 == remote.0)
-                .map(|(_, position)| {
-                    clouds.iter().map(|c| c.toxin_at(position.0)).sum::<f32>()
-                        + field.at(position.0) * POLLUTION_MAX_TOXIN
+            // Всё, что клиент показывает про воду, считается в точке ЕГО тела:
+            // биом, давления среды и местная отрава. Пока тела нет, шлём
+            // открытое море — оно же и есть значение по умолчанию.
+            let here = organisms.iter().find(|(id, _)| id.0 == remote.0).map(|(_, p)| p.0);
+            let biome = here.map(Biome::at).unwrap_or(Biome::Open);
+            let water = biome.water();
+            let local_toxin = here
+                .map(|point| {
+                    clouds.iter().map(|c| c.toxin_at(point)).sum::<f32>()
+                        + field.at(point) * POLLUTION_MAX_TOXIN
                 })
                 .unwrap_or(0.0);
             world.send::<StateChannel>(WorldUpdate {
-                season: env.season,
-                temperature: env.temperature,
-                salinity: env.salinity,
-                oxygen: env.oxygen,
-                toxin: env.toxin_level + local_toxin,
+                biome,
+                temperature: water.temperature,
+                salinity: water.salinity,
+                oxygen: water.oxygen,
+                toxin: water.toxin_level + local_toxin,
                 aggression_threshold: config.aggression_threshold,
                 kin_split_threshold: config.kin_split_threshold,
             });
@@ -575,6 +627,7 @@ fn census_log(
     field: Res<PollutionField>,
     mut next: Local<f32>,
     organisms: Query<&PlayerGenome>,
+    positions: Query<&PlayerPosition>,
     clouds: Query<(), With<ToxinCloud>>,
 ) {
     let now = time.elapsed_secs();
@@ -605,6 +658,23 @@ fn census_log(
         parts,
         clouds.iter().count()
     );
+    // Сколько кто где живёт: по этому видно, работают биомы или все сидят в
+    // одной луже.
+    let mut by_biome: HashMap<&'static str, usize> = HashMap::default();
+    for position in &positions {
+        *by_biome.entry(Biome::at(position.0).name()).or_default() += 1;
+    }
+    let mut spread: Vec<(&str, usize)> = by_biome.into_iter().collect();
+    spread.sort_by(|a, b| b.1.cmp(&a.1));
+    info!(
+        "по биомам: {}",
+        spread
+            .iter()
+            .map(|(name, count)| format!("{name} {count}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
     if field.worst() > 0.05 {
         info!(
             "вода: самая грязная клетка {:.0}% (это {:.2} яда, стойкость голого тела {:.2})",

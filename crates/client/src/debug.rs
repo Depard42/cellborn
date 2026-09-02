@@ -199,12 +199,12 @@ fn update_overlay(
          еды           {food_seen}\n\
          облаков       {clouds_seen}\n\
          пинг          {ping}\n\
-         сезон         {}   яд {:.2}\n",
+         биом          {}   яд {:.2}\n",
         version::full(),
         clock.fps,
         clock.frame_ms,
         clock.peak_ms,
-        world.season.name(),
+        world.biome.name(),
         world.toxin,
     );
 

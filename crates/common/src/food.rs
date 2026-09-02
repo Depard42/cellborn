@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::Season;
+use crate::Biome;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum FoodKind {
@@ -30,23 +30,30 @@ impl FoodKind {
         }
     }
 
-    /// How likely this kind is to spawn in a given season. This is the wire that
-    /// finally makes seasons observable: Bloom floods the map with algae, Storm
-    /// leaves only detritus.
-    pub fn weight(self, season: Season) -> f32 {
-        match (self, season) {
-            (FoodKind::Plankton, Season::Bloom) => 3.0,
-            (FoodKind::Plankton, Season::Hot) => 2.0,
-            (FoodKind::Plankton, Season::Storm) => 1.0,
-            (FoodKind::Plankton, Season::Cold) => 2.0,
-            (FoodKind::Algae, Season::Bloom) => 3.0,
-            (FoodKind::Algae, Season::Hot) => 1.2,
-            (FoodKind::Algae, Season::Storm) => 0.3,
-            (FoodKind::Algae, Season::Cold) => 0.8,
-            (FoodKind::Detritus, Season::Bloom) => 0.6,
-            (FoodKind::Detritus, Season::Hot) => 1.0,
-            (FoodKind::Detritus, Season::Storm) => 2.0,
-            (FoodKind::Detritus, Season::Cold) => 1.2,
+    /// Насколько вероятна эта пища в этом биоме.
+    ///
+    /// Не только количество еды отличает биомы, но и её **состав**: на отмели
+    /// одна мелочь, в разломе почти сплошь водоросли, которые вдвое питательнее.
+    /// Поэтому тяжёлый биом выгоден дважды — там и гуще, и сытнее.
+    pub fn weight(self, biome: Biome) -> f32 {
+        match (self, biome) {
+            (FoodKind::Plankton, Biome::Open) => 2.0,
+            (FoodKind::Plankton, Biome::Shallows) => 3.5,
+            (FoodKind::Plankton, Biome::Brine) => 1.0,
+            (FoodKind::Plankton, Biome::Vents) => 0.6,
+            (FoodKind::Plankton, Biome::Abyss) => 1.4,
+
+            (FoodKind::Algae, Biome::Open) => 1.2,
+            (FoodKind::Algae, Biome::Shallows) => 2.0,
+            (FoodKind::Algae, Biome::Brine) => 1.4,
+            (FoodKind::Algae, Biome::Vents) => 3.2,
+            (FoodKind::Algae, Biome::Abyss) => 0.4,
+
+            (FoodKind::Detritus, Biome::Open) => 0.8,
+            (FoodKind::Detritus, Biome::Shallows) => 0.5,
+            (FoodKind::Detritus, Biome::Brine) => 2.6,
+            (FoodKind::Detritus, Biome::Vents) => 1.6,
+            (FoodKind::Detritus, Biome::Abyss) => 2.2,
         }
     }
 }

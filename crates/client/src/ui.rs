@@ -467,7 +467,7 @@ pub fn update_hud(
             // парой: «вот что снаружи, вот что я терплю».
             HudLine::Environment => format!(
                 "ВОДА: {}\nT {:.2}   соль {:.2}   O2 {:.2}   яд {:.2}",
-                water.season.name(),
+                water.biome.name(),
                 water.temperature,
                 water.salinity,
                 water.oxygen,
