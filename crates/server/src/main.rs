@@ -374,14 +374,34 @@ fn handle_mutation_requests(
             if progress.dead {
                 continue;
             }
-            // The genome enforces its own ceiling; this is the server's, which may
-            // be lower than what the client is drawing against.
-            if organism.genome.parts.len() >= config.max_parts {
-                continue;
-            }
-            if organism.apply_mutation(request.kind) {
+            let accepted = match request {
+                MutationRequest::Grow(kind) => {
+                    // The genome enforces its own ceiling; this is the server's,
+                    // which may be lower than what the client is drawing against.
+                    if organism.genome.parts.len() >= config.max_parts {
+                        continue;
+                    }
+                    if organism.apply_mutation(kind) {
+                        info!("{:?} вырастил {}", remote.0, kind.name());
+                        true
+                    } else {
+                        false
+                    }
+                }
+                // Прокачка не добавляет органов, поэтому предел частей ей не
+                // помеха: тело, заполненное до потолка, всё ещё может расти
+                // вглубь.
+                MutationRequest::Upgrade(family) => {
+                    if organism.apply_upgrade(family) {
+                        info!("{:?} поднял уровень: {}", remote.0, family.name());
+                        true
+                    } else {
+                        false
+                    }
+                }
+            };
+            if accepted {
                 cooldowns.0.insert(client, now);
-                info!("{:?} grew a {}", remote.0, request.kind.name());
             }
         }
     }
@@ -420,7 +440,8 @@ fn project_state(
             || (vitals.health - organism.health).abs() > VITALS_EPSILON
             // Ноль и полный запас должны доезжать точно: на них смотрит игрок.
             || (organism.health <= 0.0 && vitals.health > 0.0)
-            || (organism.health >= MAX_HEALTH && vitals.health < MAX_HEALTH)
+            || (organism.health >= max_health(organism.mass)
+                && vitals.health < max_health(organism.mass))
         {
             *vitals = PlayerVitals { mass: organism.mass, health: organism.health };
         }

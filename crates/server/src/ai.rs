@@ -211,7 +211,9 @@ pub fn bot_perception(
         let here = position.0;
         let my_attack = attack_power_with(organism, config.base_attack);
         let my_defense = defense(organism);
-        let wounded = organism.health < MAX_HEALTH * 0.45;
+        // Доля от СВОЕГО потолка: у крупного тела здоровья больше, и сотня
+        // очков для него — царапина, а для мелкого — почти смерть.
+        let wounded = organism.health < max_health(organism.mass) * 0.45;
         let hungry = organism.energy < organism.energy_cap() * 0.75;
 
         let mut goal: Option<Vec3> = None;

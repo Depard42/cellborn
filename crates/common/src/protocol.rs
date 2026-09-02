@@ -157,13 +157,16 @@ impl Inputs {
     }
 }
 
-/// Client → server request to grow a part.
+/// Client → server request to change the body.
 ///
-/// The client sends a `PartKind` and nothing else: never the cost, never its point
-/// balance. The server owns both and re-checks everything.
+/// The client sends what it wants and nothing else: never the cost, never its
+/// point balance. The server owns both and re-checks everything.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct MutationRequest {
-    pub kind: PartKind,
+pub enum MutationRequest {
+    /// Отрастить новый орган указанного уровня.
+    Grow(PartKind),
+    /// Поднять на уровень самый слабый орган этого семейства.
+    Upgrade(crate::PartFamily),
 }
 
 /// Reliable ordered channel for gameplay requests.

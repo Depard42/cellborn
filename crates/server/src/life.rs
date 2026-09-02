@@ -396,7 +396,8 @@ pub fn survival(
             // яд снова оказывается бесплатным.
             && poison <= 0.0
         {
-            organism.health = (organism.health + config.health_regen * dt).min(MAX_HEALTH);
+            let ceiling = max_health(organism.mass);
+            organism.health = (organism.health + config.health_regen * dt).min(ceiling);
         }
     }
 }

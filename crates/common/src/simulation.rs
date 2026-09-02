@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 use crate::balance::*;
-use crate::{stats, Direction, Environment, OrganismState, PartFamily, PartKind, PartVariant, Season, BASE_MASS};
+use crate::{stats, Direction, Environment, OrganismState, PartFamily, PartKind, PartLevel, Season, BASE_MASS};
 
 /// Half-size of the playable area on the X/Z axes.
 pub const ARENA_HALF_EXTENT: f32 = 70.0;
@@ -97,6 +97,13 @@ pub fn photosynthesis_gain(organism: &OrganismState, env: &Environment) -> f32 {
     rate * season_light(env.season)
 }
 
+/// Сколько здоровья у тела такой массы.
+///
+/// Растёт линейно от массы: рост обязан давать что-то, кроме медлительности.
+pub fn max_health(mass: f32) -> f32 {
+    MAX_HEALTH + (mass - BASE_MASS).max(0.0) * HEALTH_PER_MASS
+}
+
 /// Visible radius of the body, driven by mass. Used by feeding and by the renderer,
 /// so what you see is what you can eat with.
 pub fn body_radius(mass: f32) -> f32 {
@@ -134,7 +141,11 @@ pub fn attack_power(organism: &OrganismState) -> f32 {
 
 /// Same, with the server's configured base damage.
 pub fn attack_power_with(organism: &OrganismState, base: f32) -> f32 {
-    base + organism.genome.parts.iter().map(|p| stats(p.kind).attack).sum::<f32>()
+    let organs: f32 = organism.genome.parts.iter().map(|p| stats(p.kind).attack).sum();
+    // Масса добавляет немного: таранить собой кого-то мельче должно работать,
+    // но не заменять оружие, иначе шипы теряют смысл.
+    let bulk = (organism.mass - BASE_MASS).max(0.0) * ATTACK_PER_MASS;
+    base + organs + bulk
 }
 
 /// Fraction of incoming damage the body absorbs.
@@ -221,13 +232,21 @@ pub fn toxin_emission(organism: &OrganismState) -> f32 {
     organism.genome.parts.iter().map(|p| stats(p.kind).toxin_emission).sum()
 }
 
-/// One of the 200 mutations, picked at random. The membrane family is excluded:
-/// a mutation should change the body plan, not just inflate it.
+/// Случайная мутация. Мембрана исключена: мутация должна менять план тела, а
+/// не просто раздувать его.
+///
+/// Уровень смещён к дешёвым: высокий уровень — это то, во что вкладываются, а
+/// не то, что достаётся даром. Совершенный орган у новорождённого бота сделал
+/// бы прокачку бессмысленной для всех остальных.
 pub fn random_part(roll: u64) -> PartKind {
     let families = PartFamily::ALL.len() - 1; // last one is Membrane
     let family = PartFamily::ALL[(roll as usize) % families];
-    let variant = PartVariant::ALL[((roll >> 8) as usize) % PartVariant::ALL.len()];
-    PartKind::new(family, variant)
+    let level = match (roll >> 8) % 10 {
+        0..=4 => PartLevel::Cheap,
+        5..=8 => PartLevel::Plain,
+        _ => PartLevel::Fine,
+    };
+    PartKind::new(family, level)
 }
 
 /// Moves along an arbitrary direction. Bots steer with vectors; players steer with
@@ -427,9 +446,9 @@ mod tests {
     fn offspring_inherit_every_parent_part() {
         let mut parent = Genome::starter_of(7);
         for kind in [
-            PartKind::new(PartFamily::Spike, PartVariant::Large),
-            PartKind::new(PartFamily::Gill, PartVariant::Refined),
-            PartKind::new(PartFamily::Divisome, PartVariant::Twin),
+            PartKind::new(PartFamily::Spike, PartLevel::Fine),
+            PartKind::new(PartFamily::Gill, PartLevel::Perfect),
+            PartKind::new(PartFamily::Divisome, PartLevel::Cheap),
             PartKind::basic(PartFamily::Photosynthesis),
         ] {
             parent.push_part(kind);
@@ -472,18 +491,124 @@ mod tests {
         assert!(COMBAT_REGEN_BLOCK > 0.0);
     }
 
-    /// There really are 200 mutations, and every one of them is buildable.
+    /// Каждый орган на каждом уровне существует, строится и осмыслен.
     #[test]
-    fn two_hundred_mutations_exist_and_are_sane() {
+    fn every_organ_exists_at_every_level_and_is_sane() {
         let all: Vec<PartKind> = PartKind::all().collect();
-        assert_eq!(all.len(), 200);
-        assert_eq!(PartKind::COUNT, 200);
+        assert_eq!(all.len(), PartFamily::ALL.len() * PartLevel::ALL.len());
+        assert_eq!(PartKind::COUNT, all.len());
         for kind in all {
             let s = stats(kind);
             assert!(s.cost >= 1, "{} стоит 0 очков", kind.name());
             assert!(s.mass > 0.0, "{} невесома", kind.name());
-            assert_eq!(PartKind::from_index(kind.index()), kind);
+            assert_eq!(PartKind::from_index(kind.index()), kind, "индекс не круговой");
         }
+    }
+
+    /// Прокачка обязана **ощущаться**: следующий уровень заметно сильнее и
+    /// дороже, но не настолько тяжелее, чтобы съесть весь выигрыш.
+    ///
+    /// Это то, ради чего уровни и заменили десять вариантов. Если разница
+    /// станет косметической, развитие снова сведётся к «набери побольше
+    /// органов» вместо «доведи до ума то, что есть».
+    #[test]
+    fn each_level_is_a_real_step_up() {
+        let mut previous = PartLevel::Cheap.mods();
+        for level in PartLevel::ALL.iter().skip(1) {
+            let m = level.mods();
+            assert!(m.effect > previous.effect * 1.4, "{}: прирост силы незаметен", level.name());
+            assert!(m.cost > previous.cost, "{}: не дороже предыдущего", level.name());
+            // Масса растёт медленнее силы, иначе прокачка только замедляет.
+            assert!(
+                m.effect / previous.effect > m.mass / previous.mass,
+                "{}: масса съедает весь выигрыш",
+                level.name()
+            );
+            previous = m;
+        }
+
+        // Между крайними уровнями разница должна быть в разы, а не в проценты.
+        let cheap = PartLevel::Cheap.mods();
+        let perfect = PartLevel::Perfect.mods();
+        assert!(perfect.effect / cheap.effect > 4.0, "совершенный орган недостаточно лучше");
+    }
+
+    /// Рост обязан давать власть, а не только медлительность.
+    ///
+    /// Раньше набор массы был сплошным проигрышем: тело становилось медленнее,
+    /// прожорливее и крупнее как мишень, а взамен не получало ничего. Игрок рос
+    /// и чувствовал себя слабее.
+    #[test]
+    fn growing_makes_you_stronger_not_just_slower() {
+        let small = OrganismState::default();
+        let mut genome = Genome::starter_of(1);
+        for _ in 0..8 {
+            genome.push_part(PartKind::basic(PartFamily::Carapace));
+        }
+        let big = OrganismState::from_genome(genome);
+        assert!(big.mass > small.mass * 2.0, "тело не выросло");
+
+        // Крупное труднее убить и бьёт больнее.
+        assert!(
+            max_health(big.mass) > max_health(small.mass) * 1.5,
+            "масса не прибавила живучести"
+        );
+        assert!(attack_power(&big) > attack_power(&small), "масса не прибавила урона");
+
+        // Цена роста никуда не делась: оно медленнее.
+        assert!(movement_speed(&big) < movement_speed(&small), "рост перестал что-либо стоить");
+    }
+
+    /// Вложенные очки не должны делать тело более раненым, чем оно было.
+    #[test]
+    fn an_upgrade_does_not_leave_you_hurt() {
+        let mut genome = Genome::starter_of(1);
+        genome.push_part(PartKind::cheap(PartFamily::Carapace));
+        let mut organism = OrganismState::from_genome(genome);
+        organism.genome.mutation_points = 5000;
+
+        let before = organism.health / max_health(organism.mass);
+        assert!(organism.apply_upgrade(PartFamily::Carapace));
+        let after = organism.health / max_health(organism.mass);
+        assert!(
+            after >= before - 1e-3,
+            "после прокачки доля здоровья упала: {before:.3} -> {after:.3}"
+        );
+
+        // И то же при отращивании нового органа.
+        let before = organism.health / max_health(organism.mass);
+        assert!(organism.apply_mutation(PartKind::basic(PartFamily::Carapace)));
+        let after = organism.health / max_health(organism.mass);
+        assert!(after >= before - 1e-3, "после мутации доля здоровья упала");
+    }
+
+    /// Поднять уровень должно быть дешевле, чем отрастить второй такой же —
+    /// иначе прокачки не будет вовсе, все просто продолжат набирать органы.
+    #[test]
+    fn upgrading_beats_growing_another_one() {
+        let mut genome = Genome::starter_of(1);
+        genome.push_part(PartKind::cheap(PartFamily::Spike));
+        let mut organism = OrganismState::from_genome(genome);
+        organism.genome.mutation_points = 500;
+
+        let upgrade = organism.upgrade_price(PartFamily::Spike).expect("шип есть");
+        let another = organism.price(PartKind::cheap(PartFamily::Spike));
+        assert!(
+            upgrade < another,
+            "прокачка ({upgrade}) не дешевле второго органа ({another})"
+        );
+
+        // И она действительно поднимает уровень, а не молча тратит очки.
+        let before = attack_power(&organism);
+        assert!(organism.apply_upgrade(PartFamily::Spike), "прокачка не прошла");
+        assert!(attack_power(&organism) > before, "после прокачки сила не выросла");
+        assert_eq!(organism.genome.parts.len(), 4, "прокачка отрастила лишний орган");
+
+        // Совершенный дальше не растёт.
+        for _ in 0..5 {
+            organism.apply_upgrade(PartFamily::Spike);
+        }
+        assert_eq!(organism.upgrade_error(PartFamily::Spike), Some("уже совершенный"));
     }
 
     /// Рост тела обязан дорожать, иначе поздняя игра — список покупок.
@@ -569,8 +694,8 @@ mod tests {
         organism.genome.mutation_points = 60_000;
         for kind in [
             PartKind::basic(PartFamily::Spike),
-            PartKind::new(PartFamily::Gill, PartVariant::Refined),
-            PartKind::new(PartFamily::Spike, PartVariant::Large),
+            PartKind::new(PartFamily::Gill, PartLevel::Perfect),
+            PartKind::new(PartFamily::Spike, PartLevel::Fine),
             PartKind::basic(PartFamily::Mutator),
         ] {
             assert!(organism.apply_mutation(kind), "мутация {} не прошла", kind.name());

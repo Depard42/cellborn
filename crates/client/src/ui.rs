@@ -221,7 +221,9 @@ pub fn setup_hud(mut commands: Commands, font: Res<UiFont>) {
                     ..default()
                 })
                 .with_children(|cards| {
-                    for variant in 0..PartVariant::ALL.len() {
+                    // Четыре уровня плюс карточка прокачки: последняя не растит
+                    // новый орган, а поднимает уже отращённый.
+                    for variant in 0..PartLevel::ALL.len() + 1 {
                         cards.spawn((
                             VariantCard { variant },
                             Button,
@@ -312,8 +314,10 @@ pub fn update_hud(
                     let (energy, cap) =
                         energy.map(|e| (e.energy, e.cap)).unwrap_or((0.0, 0.0));
                     format!(
-                        "Энергия {energy:.0}/{cap:.0}   Здоровье {:.0}   Масса {:.1}",
-                        v.health, v.mass
+                        "Энергия {energy:.0}/{cap:.0}   Здоровье {:.0}/{:.0}   Масса {:.1}",
+                        v.health,
+                        max_health(v.mass),
+                        v.mass
                     )
                 }
                 None => "-".to_string(),
@@ -346,7 +350,9 @@ pub fn update_hud(
             (Some((_, Some(energy), _, _)), HudBar::Energy) => {
                 (energy.energy / energy.cap.max(1.0) * 100.0).clamp(0.0, 100.0)
             }
-            (Some((v, _, _, _)), HudBar::Health) => v.health.clamp(0.0, 100.0),
+            (Some((v, _, _, _)), HudBar::Health) => {
+                (v.health / max_health(v.mass).max(1.0) * 100.0).clamp(0.0, 100.0)
+            }
             _ => 0.0,
         };
         node.width = Val::Percent(fill);
@@ -429,7 +435,43 @@ pub fn update_mutation_panel(
     }
 
     for (card, mut text, mut background) in &mut cards {
-        let kind = PartKind::new(family, PartVariant::ALL[card.variant]);
+        // Последняя карточка — прокачка уже отращённого органа.
+        if card.variant == PartLevel::ALL.len() {
+            let price = organism.as_ref().and_then(|o| o.upgrade_price(family));
+            let error = organism
+                .as_ref()
+                .and_then(|o| o.upgrade_error(family))
+                .or(if organism.is_some() { None } else { Some("нет тела") });
+            let current = organism
+                .as_ref()
+                .and_then(|o| o.weakest_of(family))
+                .and_then(|i| organism.as_ref().map(|o| o.genome.parts[i].kind));
+
+            let value = format!(
+                "{}  ПОДНЯТЬ УРОВЕНЬ  [{} очк.]\n{}\n{}",
+                card.variant + 1,
+                price.map(|p| p.to_string()).unwrap_or_else(|| "-".into()),
+                match current {
+                    Some(kind) => match kind.upgraded() {
+                        Some(next) => format!("{} → {}", kind.level.name(), next.level.name()),
+                        None => "уже совершенный".to_string(),
+                    },
+                    None => "сначала отрасти орган".to_string(),
+                },
+                error.unwrap_or("дешевле, чем растить второй такой же"),
+            );
+            if text.0 != value {
+                text.0 = value;
+            }
+            background.0 = if error.is_none() {
+                Color::srgba(0.85, 0.70, 0.35, 0.26)
+            } else {
+                Color::srgba(1.0, 1.0, 1.0, 0.05)
+            };
+            continue;
+        }
+
+        let kind = PartKind::new(family, PartLevel::ALL[card.variant]);
         let stats = cellborn_common::stats(kind);
         // The price shown is what this body pays now, surcharge included — not
         // the base price, which nobody past their third organ actually pays.
@@ -445,7 +487,7 @@ pub fn update_mutation_panel(
         let value = format!(
             "{}  {}  [{} очк.]{}\n{}\nмасса {:.1}   содержание {:.2}/с\n{}",
             card.variant + 1,
-            PartVariant::ALL[card.variant].name(),
+            PartLevel::ALL[card.variant].name(),
             price,
             if owned > 0 { format!("   уже {owned}") } else { String::new() },
             effect_summary(kind),
@@ -453,7 +495,7 @@ pub fn update_mutation_panel(
             stats.upkeep,
             match error {
                 Some(reason) => reason,
-                None => PartVariant::ALL[card.variant].hint(),
+                None => PartLevel::ALL[card.variant].hint(),
             },
         );
         if text.0 != value {
@@ -494,17 +536,14 @@ pub fn mutation_input(
     cards: Query<(&Interaction, &VariantCard), Changed<Interaction>>,
     mut sender: Query<&mut MessageSender<MutationRequest>, With<Client>>,
 ) {
-    const DIGITS: [KeyCode; 10] = [
+    // Пять клавиш: четыре уровня и прокачка. Больше не нужно — карточек ровно
+    // столько.
+    const DIGITS: [KeyCode; 5] = [
         KeyCode::Digit1,
         KeyCode::Digit2,
         KeyCode::Digit3,
         KeyCode::Digit4,
         KeyCode::Digit5,
-        KeyCode::Digit6,
-        KeyCode::Digit7,
-        KeyCode::Digit8,
-        KeyCode::Digit9,
-        KeyCode::Digit0,
     ];
 
     let mut wanted: Option<usize> = None;
@@ -519,9 +558,13 @@ pub fn mutation_input(
         }
     }
 
-    let Some(variant) = wanted else { return; };
+    let Some(slot) = wanted else { return; };
     let Ok(mut sender) = sender.single_mut() else { return; };
     let family = PartFamily::ALL[selection.family % PartFamily::ALL.len()];
-    let kind = PartKind::new(family, PartVariant::ALL[variant % PartVariant::ALL.len()]);
-    sender.send::<GameplayChannel>(MutationRequest { kind });
+    let request = match PartLevel::ALL.get(slot) {
+        Some(level) => MutationRequest::Grow(PartKind::new(family, *level)),
+        // Слот за последним уровнем — прокачка уже отращённого.
+        None => MutationRequest::Upgrade(family),
+    };
+    sender.send::<GameplayChannel>(request);
 }

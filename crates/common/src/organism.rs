@@ -28,29 +28,35 @@ pub enum PartFamily {
     Carapace,
 }
 
-/// How that organ turned out. The same organ grown ten different ways: cheaper,
-/// heavier, more potent, more wasteful.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub enum PartVariant {
-    Basic,
-    Small,
-    Large,
-    Potent,
-    Thrifty,
-    Fragile,
-    Dense,
-    Twin,
-    Feral,
-    Refined,
+/// Насколько хорошо развит орган. Один и тот же орган на четырёх уровнях.
+///
+/// Раньше здесь было десять вариантов — «крупный», «хрупкий», «двойной» и так
+/// далее, — каждый со своим набором компромиссов. Красиво на бумаге и
+/// нечитаемо в игре: чтобы выбрать, приходилось сравнивать четыре числа между
+/// десятью карточками, и большинство вариантов оказывались просто хуже других.
+///
+/// Четыре уровня решают это одной строкой: следующий лучше предыдущего во всём,
+/// кроме цены. Выбирать нужно не «какой», а «насколько сейчас по карману».
+///
+/// Уровень можно **поднять у уже отращённого органа**, а можно сразу купить
+/// высокий и перескочить ступени — за полную цену.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PartLevel {
+    /// Дешёвый: слабее обычного, но по карману с самого начала.
+    Cheap,
+    /// Обычный: то, чем орган задуман.
+    Plain,
+    /// Улучшенный: заметно сильнее.
+    Fine,
+    /// Совершенный: столько, сколько орган способен дать.
+    Perfect,
 }
 
-/// A part is a family grown in one particular way: 20 × 10 = **200 mutations**,
-/// each with its own cost, mass, upkeep and effect — without 200 hand-written
-/// table rows that would inevitably drift apart.
+/// Орган определённого уровня развития.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct PartKind {
     pub family: PartFamily,
-    pub variant: PartVariant,
+    pub level: PartLevel,
 }
 
 impl PartFamily {
@@ -234,110 +240,106 @@ pub struct VariantMods {
     pub effect: f32,
 }
 
-impl PartVariant {
-    pub const ALL: [PartVariant; 10] = [
-        PartVariant::Basic,
-        PartVariant::Small,
-        PartVariant::Large,
-        PartVariant::Potent,
-        PartVariant::Thrifty,
-        PartVariant::Fragile,
-        PartVariant::Dense,
-        PartVariant::Twin,
-        PartVariant::Feral,
-        PartVariant::Refined,
-    ];
+impl PartLevel {
+    pub const ALL: [PartLevel; 4] =
+        [PartLevel::Cheap, PartLevel::Plain, PartLevel::Fine, PartLevel::Perfect];
 
     pub fn name(self) -> &'static str {
         match self {
-            PartVariant::Basic => "обычный",
-            PartVariant::Small => "малый",
-            PartVariant::Large => "крупный",
-            PartVariant::Potent => "усиленный",
-            PartVariant::Thrifty => "экономный",
-            PartVariant::Fragile => "хрупкий",
-            PartVariant::Dense => "плотный",
-            PartVariant::Twin => "двойной",
-            PartVariant::Feral => "дикий",
-            PartVariant::Refined => "совершенный",
+            PartLevel::Cheap => "дешёвый",
+            PartLevel::Plain => "обычный",
+            PartLevel::Fine => "улучшенный",
+            PartLevel::Perfect => "совершенный",
         }
     }
 
-    /// One line explaining the trade this variant makes.
+    /// One line explaining what this level is for.
     pub fn hint(self) -> &'static str {
         match self {
-            PartVariant::Basic => "как есть",
-            PartVariant::Small => "слабее, но лёгкий и дешёвый",
-            PartVariant::Large => "сильнее, тяжелее, дороже в содержании",
-            PartVariant::Potent => "вдвое эффективнее, прожорливый",
-            PartVariant::Thrifty => "почти не ест энергию, чуть слабее",
-            PartVariant::Fragile => "эффективный и лёгкий, дёшев в очках",
-            PartVariant::Dense => "тяжёлый, но крепкий и недорогой в содержании",
-            PartVariant::Twin => "две штуки в одной, во всём вдвое",
-            PartVariant::Feral => "мощнее, но ест много",
-            PartVariant::Refined => "лучший во всём, кроме цены",
+            PartLevel::Cheap => "слабее, зато по карману сразу",
+            PartLevel::Plain => "как орган задуман",
+            PartLevel::Fine => "заметно сильнее, дороже в содержании",
+            PartLevel::Perfect => "всё, что орган способен дать",
         }
+    }
+
+    pub fn step(self) -> usize {
+        match self {
+            PartLevel::Cheap => 0,
+            PartLevel::Plain => 1,
+            PartLevel::Fine => 2,
+            PartLevel::Perfect => 3,
+        }
+    }
+
+    /// Следующий уровень, если он есть.
+    pub fn next(self) -> Option<PartLevel> {
+        Self::ALL.get(self.step() + 1).copied()
     }
 
     pub fn mods(self) -> VariantMods {
         let m = |cost, mass, upkeep, effect| VariantMods { cost, mass, upkeep, effect };
+        // Эффект растёт круче, чем масса и содержание, — и это главное, ради
+        // чего уровни вообще существуют. Прокачка обязана **ощущаться**: между
+        // дешёвым и совершенным разница почти впятеро по силе при вдвое
+        // большем весе. Иначе развитие снова сведётся к «набери побольше
+        // органов», а не «доведи до ума то, что уже есть».
         match self {
-            PartVariant::Basic => m(1.0, 1.0, 1.0, 1.0),
-            PartVariant::Small => m(0.6, 0.5, 0.6, 0.6),
-            PartVariant::Large => m(1.6, 1.8, 1.5, 1.6),
-            PartVariant::Potent => m(1.8, 1.2, 1.9, 2.0),
-            PartVariant::Thrifty => m(1.3, 1.0, 0.4, 0.85),
-            PartVariant::Fragile => m(0.5, 0.6, 0.8, 1.35),
-            PartVariant::Dense => m(1.4, 2.2, 0.9, 1.25),
-            PartVariant::Twin => m(1.9, 1.9, 1.8, 2.0),
-            PartVariant::Feral => m(1.1, 1.1, 1.7, 1.5),
-            PartVariant::Refined => m(2.6, 0.9, 0.85, 1.8),
+            PartLevel::Cheap => m(0.55, 0.70, 0.70, 0.60),
+            PartLevel::Plain => m(1.00, 1.00, 1.00, 1.00),
+            PartLevel::Fine => m(2.20, 1.35, 1.50, 1.75),
+            PartLevel::Perfect => m(4.50, 1.80, 2.10, 2.90),
         }
     }
 }
 
 impl PartKind {
-    pub const fn new(family: PartFamily, variant: PartVariant) -> Self {
-        Self { family, variant }
+    pub const fn new(family: PartFamily, level: PartLevel) -> Self {
+        Self { family, level }
     }
 
     /// The plain version of an organ.
     pub const fn basic(family: PartFamily) -> Self {
-        Self::new(family, PartVariant::Basic)
+        Self::new(family, PartLevel::Plain)
     }
 
-    /// All 200 mutations, family by family.
+    /// Самый дешёвый уровень: с него начинают, если считают очки.
+    pub const fn cheap(family: PartFamily) -> Self {
+        Self::new(family, PartLevel::Cheap)
+    }
+
+    /// Все мутации: каждый орган на каждом уровне.
     pub fn all() -> impl Iterator<Item = PartKind> {
         PartFamily::ALL
             .into_iter()
-            .flat_map(|family| PartVariant::ALL.into_iter().map(move |v| PartKind::new(family, v)))
+            .flat_map(|family| PartLevel::ALL.into_iter().map(move |v| PartKind::new(family, v)))
     }
 
     /// How many mutations exist in total.
-    pub const COUNT: usize = PartFamily::ALL.len() * PartVariant::ALL.len();
+    pub const COUNT: usize = PartFamily::ALL.len() * PartLevel::ALL.len();
 
     pub fn index(self) -> usize {
-        let f = PartFamily::ALL.iter().position(|f| *f == self.family).unwrap_or(0);
-        let v = PartVariant::ALL.iter().position(|v| *v == self.variant).unwrap_or(0);
-        f * PartVariant::ALL.len() + v
+        self.family.slot() * PartLevel::ALL.len() + self.level.step()
     }
 
     pub fn from_index(index: usize) -> Self {
         let index = index % Self::COUNT;
-        let family = PartFamily::ALL[index / PartVariant::ALL.len()];
-        let variant = PartVariant::ALL[index % PartVariant::ALL.len()];
-        Self::new(family, variant)
+        let family = PartFamily::ALL[index / PartLevel::ALL.len()];
+        let level = PartLevel::ALL[index % PartLevel::ALL.len()];
+        Self::new(family, level)
+    }
+
+    /// Тот же орган на следующем уровне, если он есть.
+    pub fn upgraded(self) -> Option<PartKind> {
+        self.level.next().map(|level| Self::new(self.family, level))
     }
 
     pub fn name(self) -> String {
-        match self.variant {
-            PartVariant::Basic => self.family.name().to_string(),
-            other => format!("{} ({})", self.family.name(), other.name()),
-        }
+        format!("{} ({})", self.family.name(), self.level.name())
     }
 
     pub fn tradeoff(self) -> String {
-        format!("{} · {}", self.family.tradeoff(), self.variant.hint())
+        format!("{} · {}", self.family.tradeoff(), self.level.hint())
     }
 
     pub fn is_external(self) -> bool {
@@ -404,7 +406,7 @@ impl PartStats {
 /// Stats of one of the 200 parts: the family's base, reshaped by the variant.
 pub fn stats(kind: PartKind) -> PartStats {
     let base = kind.family.base();
-    let m = kind.variant.mods();
+    let m = kind.level.mods();
     let e = m.effect;
     PartStats {
         cost: ((base.cost as f32 * m.cost).round() as u16).max(1),
@@ -789,6 +791,7 @@ impl Default for OrganismState {
             oxygen_affinity: BASE_OXYGEN_AFFINITY,
         };
         state.recompute();
+        state.health = crate::max_health(state.mass);
         state.energy = state.energy_cap();
         state
     }
@@ -800,6 +803,10 @@ impl OrganismState {
     pub fn from_genome(genome: Genome) -> Self {
         let mut state = Self { genome, ..Default::default() };
         state.recompute();
+        // Полное здоровье, а не константа: у крупного тела потолок выше, и
+        // рождаться сразу раненым оно не должно.
+        state.health = crate::max_health(state.mass);
+        state.energy = state.energy_cap();
         state
     }
 
@@ -869,13 +876,88 @@ impl OrganismState {
         None
     }
 
+    /// Какой орган этого семейства будет подниматься: самый слабый из имеющихся.
+    ///
+    /// Именно самый слабый, а не любой: прокачка должна подтягивать отстающее,
+    /// иначе игрок будет доводить один орган до совершенства, пока остальные
+    /// остаются дешёвыми, — и не заметит, что тело перекошено.
+    pub fn weakest_of(&self, family: PartFamily) -> Option<usize> {
+        self.genome
+            .parts
+            .iter()
+            .enumerate()
+            .filter(|(_, part)| part.kind.family == family)
+            .min_by_key(|(_, part)| part.kind.level)
+            .map(|(index, _)| index)
+    }
+
+    /// Во что обойдётся поднять этот орган на уровень.
+    ///
+    /// Разница цен между уровнями, а не полная цена нового: вкладываться в уже
+    /// отращённое должно быть выгоднее, чем отращивать рядом ещё одно. Иначе
+    /// прокачки не будет вовсе — все просто продолжат набирать органы.
+    pub fn upgrade_price(&self, family: PartFamily) -> Option<u16> {
+        let index = self.weakest_of(family)?;
+        let current = self.genome.parts[index].kind;
+        let next = current.upgraded()?;
+        Some(self.price(next).saturating_sub(self.price(current)).max(1))
+    }
+
+    /// Почему орган нельзя поднять, или `None`, если можно.
+    pub fn upgrade_error(&self, family: PartFamily) -> Option<&'static str> {
+        let Some(index) = self.weakest_of(family) else {
+            return Some("такого органа нет");
+        };
+        if self.genome.parts[index].kind.upgraded().is_none() {
+            return Some("уже совершенный");
+        }
+        match self.upgrade_price(family) {
+            Some(price) if self.genome.mutation_points >= price => None,
+            _ => Some("не хватает очков"),
+        }
+    }
+
+    /// Поднимает самый слабый орган этого семейства на уровень.
+    pub fn apply_upgrade(&mut self, family: PartFamily) -> bool {
+        if self.upgrade_error(family).is_some() {
+            return false;
+        }
+        let (Some(index), Some(price)) = (self.weakest_of(family), self.upgrade_price(family))
+        else {
+            return false;
+        };
+        let Some(next) = self.genome.parts[index].kind.upgraded() else { return false };
+
+        let before = crate::max_health(self.mass);
+        self.genome.mutation_points -= price;
+        self.genome.parts[index].kind = next;
+        self.genome.parts[index].level = next.level.step() as u8 + 1;
+        self.recompute();
+        self.grow_into_new_body(before);
+        true
+    }
+
+    /// Прибавляет здоровье, которое дала выросшая масса.
+    ///
+    /// Без этого прокачка ощущалась наказанием: потолок здоровья поднимался, а
+    /// сама полоска оставалась на месте, и организм после вложенных очков
+    /// выглядел **более раненым**, чем до них. Новая плоть приходит целой.
+    fn grow_into_new_body(&mut self, previous_max: f32) {
+        let gained = crate::max_health(self.mass) - previous_max;
+        if gained > 0.0 {
+            self.health += gained;
+        }
+    }
+
     pub fn apply_mutation(&mut self, kind: PartKind) -> bool {
         if self.mutation_error(kind).is_some() {
             return false;
         }
+        let before = crate::max_health(self.mass);
         self.genome.mutation_points -= self.price(kind);
         self.genome.push_part(kind);
         self.recompute();
+        self.grow_into_new_body(before);
         true
     }
 

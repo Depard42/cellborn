@@ -166,19 +166,14 @@ pub fn part_color(kind: PartKind) -> Color {
         Chemoreceptor => Color::srgb(0.55, 0.80, 0.85),
         Carapace => Color::srgb(0.55, 0.55, 0.60),
     };
-    // The variant shifts the shade, so two flagella of different builds are
-    // distinguishable on the body without a legend.
-    let lift = match kind.variant {
-        PartVariant::Basic => 1.0,
-        PartVariant::Small => 0.80,
-        PartVariant::Large => 1.15,
-        PartVariant::Potent => 1.30,
-        PartVariant::Thrifty => 0.90,
-        PartVariant::Fragile => 1.20,
-        PartVariant::Dense => 0.70,
-        PartVariant::Twin => 1.10,
-        PartVariant::Feral => 1.25,
-        PartVariant::Refined => 1.40,
+    // Уровень поднимает яркость: совершенный орган светится заметно ярче
+    // дешёвого. Прокачка должна быть **видна** на теле, а не только в числах —
+    // это половина ощущения от вложенных очков.
+    let lift = match kind.level {
+        PartLevel::Cheap => 0.72,
+        PartLevel::Plain => 1.0,
+        PartLevel::Fine => 1.35,
+        PartLevel::Perfect => 1.75,
     };
     let c = LinearRgba::from(base);
     Color::from(LinearRgba::new(
@@ -910,7 +905,9 @@ pub fn update_health_bars(
     let camera_position = camera.translation();
 
     for (vitals, body, children) in &organisms {
-        let fraction = (vitals.health / MAX_HEALTH).clamp(0.0, 1.0);
+        // Потолок считается от массы: у крупного тела его больше, и полоска
+        // обязана показывать долю от собственного запаса, а не от чужого.
+        let fraction = (vitals.health / max_health(vitals.mass)).clamp(0.0, 1.0);
         for child in children.iter() {
             let Ok((mut bar_transform, bar_children)) = bars.get_mut(child) else { continue; };
             bar_transform.translation.y = body.radius + 0.95;
