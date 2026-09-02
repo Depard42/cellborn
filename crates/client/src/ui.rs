@@ -15,6 +15,50 @@ use crate::ServerAddress;
 #[derive(Resource)]
 pub struct UiFont(pub Handle<Font>);
 
+/// Иконки интерфейса.
+///
+/// Обычные файлы в `assets/ui`, а не вшитые в бинарник: их рисует
+/// `scripts/make-icons.py`, и перерисовать иконку должно быть можно без
+/// пересборки игры.
+///
+/// Шрифт при этом остаётся вшитым, и это не непоследовательность: пропавшая
+/// иконка — это интерфейс без картинки, а пропавший шрифт — интерфейс без
+/// единой буквы, причём молча.
+#[derive(Resource)]
+pub struct UiIcons {
+    pub energy: Handle<Image>,
+    pub health: Handle<Image>,
+    pub mass: Handle<Image>,
+    pub points: Handle<Image>,
+    pub mutation: Handle<Image>,
+    pub danger: Handle<Image>,
+}
+
+pub fn load_icons(mut commands: Commands, assets: Res<AssetServer>) {
+    commands.insert_resource(UiIcons {
+        energy: assets.load("ui/energy.png"),
+        health: assets.load("ui/health.png"),
+        mass: assets.load("ui/mass.png"),
+        points: assets.load("ui/points.png"),
+        mutation: assets.load("ui/mutation.png"),
+        danger: assets.load("ui/danger.png"),
+    });
+}
+
+/// Иконка перед строкой: маленькая, ровно в высоту текста.
+fn icon(image: &Handle<Image>, size: f32) -> impl Bundle {
+    (
+        Node {
+            width: Val::Px(size),
+            height: Val::Px(size),
+            margin: UiRect::right(Val::Px(6.0)),
+            flex_shrink: 0.0,
+            ..default()
+        },
+        ImageNode::new(image.clone()),
+    )
+}
+
 const FONT_BYTES: &[u8] = include_bytes!("../../../assets/fonts/DejaVuSans.ttf");
 
 /// Ставит шрифт до запуска систем.
@@ -80,7 +124,7 @@ pub struct DeathOverlay;
 const PANEL: Color = Color::srgba(0.02, 0.07, 0.09, 0.80);
 const LABEL: Color = Color::srgb(0.74, 0.88, 0.90);
 
-pub fn setup_hud(mut commands: Commands, font: Res<UiFont>) {
+pub fn setup_hud(mut commands: Commands, font: Res<UiFont>, icons: Res<UiIcons>) {
     let font = &font.0;
     // Vitals panel, top left.
     commands
@@ -106,8 +150,8 @@ pub fn setup_hud(mut commands: Commands, font: Res<UiFont>) {
                 TextColor(Color::srgb(0.95, 0.75, 0.35)),
                 HudLine::Status,
             ));
-            bar(panel, HudBar::Energy, Color::srgb(0.35, 0.85, 0.65));
-            bar(panel, HudBar::Health, Color::srgb(0.85, 0.35, 0.40));
+            bar(panel, HudBar::Energy, Color::srgb(0.35, 0.85, 0.65), &icons.energy);
+            bar(panel, HudBar::Health, Color::srgb(0.85, 0.35, 0.40), &icons.health);
             panel.spawn((
                 Text::new("-"),
                 TextFont { font: FontSource::Handle(font.clone()), font_size: FontSize::Px(13.0), ..default() },
@@ -244,28 +288,46 @@ pub fn setup_hud(mut commands: Commands, font: Res<UiFont>) {
         });
 }
 
-fn bar(panel: &mut ChildSpawnerCommands, kind: HudBar, color: Color) {
+/// Полоса с иконкой слева.
+///
+/// Иконка вместо подписи: «капля» и «сердце» читаются мгновенно и на любом
+/// языке, а слово «Энергия» надо прочесть. Игровой интерфейс не должен
+/// заставлять читать то, что можно узнать.
+fn bar(panel: &mut ChildSpawnerCommands, kind: HudBar, color: Color, image: &Handle<Image>) {
     panel
-        .spawn((
-            Node {
-                width: Val::Percent(100.0),
-                height: Val::Px(8.0),
-                border_radius: BorderRadius::all(Val::Px(4.0)),
-                ..default()
-            },
-            BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.10)),
-        ))
-        .with_children(|track| {
-            track.spawn((
+        .spawn(Node {
+            width: Val::Percent(100.0),
+            align_items: AlignItems::Center,
+            ..default()
+        })
+        .with_children(|row| {
+            row.spawn(icon(image, 15.0));
+            row.spawn((
                 Node {
-                    width: Val::Percent(0.0),
-                    height: Val::Percent(100.0),
-                    border_radius: BorderRadius::all(Val::Px(4.0)),
+                    width: Val::Percent(100.0),
+                    height: Val::Px(11.0),
+                    border: UiRect::all(Val::Px(1.0)),
+                    border_radius: BorderRadius::all(Val::Px(6.0)),
+                    padding: UiRect::all(Val::Px(1.0)),
                     ..default()
                 },
-                BackgroundColor(color),
-                kind,
-            ));
+                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.35)),
+                // Рамка делает полосу предметом, а не заливкой: без неё пустая
+                // шкала сливается с панелью и кажется, что её нет.
+                BorderColor::all(Color::srgba(1.0, 1.0, 1.0, 0.16)),
+            ))
+                .with_children(|track| {
+                    track.spawn((
+                        Node {
+                            width: Val::Percent(0.0),
+                            height: Val::Percent(100.0),
+                            border_radius: BorderRadius::all(Val::Px(5.0)),
+                            ..default()
+                        },
+                        BackgroundColor(color),
+                        kind,
+                    ));
+                });
         });
 }
 
@@ -567,4 +629,28 @@ pub fn mutation_input(
         None => MutationRequest::Upgrade(family),
     };
     sender.send::<GameplayChannel>(request);
+}
+
+#[cfg(test)]
+mod tests {
+    /// Иконки лежат файлами, и это значит, что их легко потерять: не
+    /// переименовать в скрипте, не положить в релиз, не докопировать при
+    /// обновлении. Пропажу видно только на экране, и то не сразу.
+    ///
+    /// Поэтому список нужных файлов проверяется сборкой. Путь строится от
+    /// каталога крейта, а не от рабочего: тесты запускают из разных мест.
+    #[test]
+    fn every_icon_the_ui_asks_for_exists() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/ui");
+        for name in ["energy", "health", "mass", "points", "mutation", "danger"] {
+            let path = root.join(format!("{name}.png"));
+            let bytes = std::fs::read(&path)
+                .unwrap_or_else(|e| panic!("нет иконки {}: {e}", path.display()));
+            // Заголовок PNG: файл должен быть картинкой, а не пустышкой или
+            // текстом, случайно сохранённым под этим именем.
+            assert_eq!(&bytes[..4], b"\x89PNG", "{name}.png не PNG");
+            assert!(bytes.len() > 100, "{name}.png подозрительно пуст");
+        }
+    }
 }

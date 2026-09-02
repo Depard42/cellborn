@@ -36,6 +36,50 @@ const CAMERA_OFFSET: Vec3 = Vec3::new(0.0, 11.0, 12.0);
 #[derive(Component)]
 pub struct MainCamera;
 
+/// Находит папку `assets` и говорит Bevy, где она.
+///
+/// Сам он ищет её так: переменная `BEVY_ASSET_ROOT`, иначе `CARGO_MANIFEST_DIR`,
+/// иначе каталог рядом с исполняемым файлом. Ни один из двух последних нам не
+/// подходит: `cargo run` подставляет каталог **крейта** (`crates/client`), а не
+/// корень репозитория, а собранный бинарник лежит в `target/release`, где
+/// ассетов тоже нет.
+///
+/// Поэтому ищем сами и ставим переменную. Порядок проверки — от того, как игра
+/// запущена у игрока, к тому, как она запущена у разработчика.
+fn point_bevy_at_the_assets() {
+    // Уважаем чужой выбор: если переменная задана снаружи, она главнее.
+    if std::env::var_os("BEVY_ASSET_ROOT").is_some() {
+        return;
+    }
+
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    // Рядом с игрой: так лежит распакованный релиз.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.to_path_buf());
+        }
+    }
+    // Корень репозитория: так работает `cargo run` и `./scripts/run.sh`.
+    if let Ok(crate_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        let path = std::path::Path::new(&crate_dir);
+        candidates.extend(path.ancestors().take(3).map(std::path::Path::to_path_buf));
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd);
+    }
+
+    // Проверяем не саму папку, а файл внутри: пустой `assets/`, оставшийся от
+    // чего-то другого, увёл бы поиск в тупик.
+    for root in candidates {
+        if root.join("assets/ui/energy.png").is_file() {
+            // SAFETY: единственный поток, до запуска приложения.
+            std::env::set_var("BEVY_ASSET_ROOT", &root);
+            return;
+        }
+    }
+    warn!("не нашёл папку assets — интерфейс останется без иконок");
+}
+
 /// Address of the server, overridable with the first CLI argument.
 #[derive(Resource)]
 pub struct ServerAddress(pub SocketAddr);
@@ -45,6 +89,9 @@ fn main() {
         .nth(1)
         .and_then(|arg| arg.parse::<SocketAddr>().ok())
         .unwrap_or_else(server_addr);
+
+    // Корень ассетов задаётся до плагинов: Bevy читает его при старте.
+    point_bevy_at_the_assets();
 
     let mut app = App::new();
     app.add_plugins(DefaultPlugins);
@@ -88,6 +135,7 @@ fn main() {
     app.add_systems(Update, menu::game_escape.run_if(in_state(Screen::Game)));
     app.add_systems(Update, atlas::spin_preview);
     ui::install_font(&mut app);
+    app.add_systems(PreStartup, ui::load_icons);
     // После установки шрифта: панель отладки собирается в `Startup` и просит его.
     app.add_plugins(debug::plugin);
     app.add_plugins(update::plugin);

@@ -162,6 +162,9 @@ jobs:
           # отладочные символы, которые игроку не нужны.
           strip dist/cellborn-client dist/cellborn-server
           cp scripts/windows/cellborn-server.cfg dist/
+          # Ассеты едут папкой рядом с игрой. Обновлятор раскладывает архив,
+          # сохраняя вложенность, так что assets/ui/*.png попадут куда надо.
+          cp -r assets dist/
           cp docs/MECHANICS.md dist/МЕХАНИКА.txt
           cp docs/TESTING.md dist/ЧТО-ПРОВЕРИТЬ.txt
           cat > dist/играть.sh <<'SH'
@@ -184,10 +187,13 @@ jobs:
           Copy-Item target/release/cellborn-client.exe, target/release/cellborn-server.exe dist/
           Copy-Item scripts/windows/*.bat dist/
           Copy-Item scripts/windows/cellborn-server.cfg dist/
+          Copy-Item -Recurse assets dist/assets
           Copy-Item scripts/windows/ЧИТАТЬ.txt dist/
           Copy-Item docs/MECHANICS.md dist/МЕХАНИКА.txt
           Copy-Item docs/TESTING.md dist/ЧТО-ПРОВЕРИТЬ.txt
-          # Тексты — с CRLF, иначе блокнот покажет их одной строкой.
+          # Тексты — с CRLF, иначе блокнот покажет их одной строкой. Только
+          # верхний уровень: внутри assets текстов нет, а картинки трогать
+          # переводом строк нельзя.
           Get-ChildItem dist/*.txt, dist/*.cfg | ForEach-Object {
             $body = (Get-Content $_.FullName -Raw) -replace "`r`n", "`n" -replace "`n", "`r`n"
             Set-Content -Path $_.FullName -Value $body -NoNewline
