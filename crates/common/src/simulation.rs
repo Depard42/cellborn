@@ -121,9 +121,32 @@ pub fn sense_range(organism: &OrganismState) -> f32 {
 }
 
 /// Swimming speed in units per second: parts add thrust, mass takes it away.
+///
+/// Пузыри уменьшают, насколько масса давит на ход: за скорость крупного тела
+/// теперь можно доплатить органами, а не только оставаться мелким.
 pub fn movement_speed(organism: &OrganismState) -> f32 {
     let thrust: f32 = organism.genome.parts.iter().map(|p| stats(p.kind).speed).sum();
-    ((BASE_SPEED + thrust) / (1.0 + organism.mass * MASS_DRAG)).max(0.5)
+    let buoyancy: f32 = organism.genome.parts.iter().map(|p| stats(p.kind).buoyancy).sum();
+    // Не до нуля: совсем отменить цену массы нельзя, иначе рост станет
+    // бесплатным и выбор исчезнет.
+    let drag = MASS_DRAG * (1.0 - buoyancy.min(0.75));
+    ((BASE_SPEED + thrust) / (1.0 + organism.mass * drag)).max(0.5)
+}
+
+/// Насколько тело способно протиснуться в куст сверх собственного размера.
+///
+/// Присоски дают крупному телу доступ к укрытиям, которые иначе достаются
+/// только мелким. Это ответ на то, что выросший игрок терял их навсегда.
+pub fn squeeze(organism: &OrganismState) -> f32 {
+    organism.genome.parts.iter().map(|p| stats(p.kind).squeeze).sum()
+}
+
+/// Насколько быстро тело чистит воду вокруг себя.
+///
+/// Фильтры — ответ на загрязнение от скопления: с ними можно жить там, где
+/// стоят все, и не травиться собственной толпой.
+pub fn cleansing(organism: &OrganismState) -> f32 {
+    organism.genome.parts.iter().map(|p| stats(p.kind).cleansing).sum()
 }
 
 /// Damage per second this organism deals on contact.
@@ -136,7 +159,11 @@ pub fn attack_power_with(organism: &OrganismState, base: f32) -> f32 {
     let organs: f32 = organism.genome.parts.iter().map(|p| stats(p.kind).attack).sum();
     // Масса добавляет немного: таранить собой кого-то мельче должно работать,
     // но не заменять оружие, иначе шипы теряют смысл.
-    let bulk = (organism.mass - BASE_MASS).max(0.0) * ATTACK_PER_MASS;
+    //
+    // Таран умножает именно этот вклад — он превращает набранный вес в оружие
+    // для тех, кто в вес и вкладывался. Шипам он не помогает никак.
+    let ram: f32 = organism.genome.parts.iter().map(|p| stats(p.kind).ram).sum();
+    let bulk = (organism.mass - BASE_MASS).max(0.0) * ATTACK_PER_MASS * (1.0 + ram);
     base + organs + bulk
 }
 
@@ -775,6 +802,77 @@ mod tests {
         organism.tick_perks(Perk::Squid.cooldown(organism.mass) + 0.01);
         assert!(organism.perk_ready(Perk::Squid), "способность не вернулась вовремя");
         assert!((organism.perk_readiness(Perk::Squid) - 1.0).abs() < 1e-3);
+    }
+
+    /// Новые органы обязаны отвечать на конкретную проблему, а не быть
+    /// прибавкой к числу: каждый из них появился как ответ на то, что механика
+    /// оказалась тупиковой.
+    #[test]
+    fn the_new_organs_answer_the_problems_they_were_added_for() {
+        use crate::{cleansing, squeeze, Thorn};
+
+        let with = |family, count| {
+            let mut genome = Genome::starter_of(1);
+            for _ in 0..count {
+                genome.push_part(PartKind::basic(family));
+            }
+            OrganismState::from_genome(genome)
+        };
+
+        // ПРИСОСКА: выросший терял укрытия навсегда. Теперь может вернуться.
+        let big = with(PartFamily::Carapace, 6);
+        let radius = body_radius(big.mass);
+        assert!(Thorn::hurts(radius), "предпосылка неверна: тело и так пролезает");
+        let mut genome = big.genome.clone();
+        for _ in 0..3 {
+            genome.push_part(PartKind::new(PartFamily::Holdfast, PartLevel::Perfect));
+        }
+        let sneaky = OrganismState::from_genome(genome);
+        assert!(
+            !Thorn::hurts_with(body_radius(sneaky.mass), squeeze(&sneaky)),
+            "присоски не пускают крупного в куст"
+        );
+
+        // ПУЗЫРЬ: рост всегда стоил скорости, и доплатить было нечем.
+        let heavy = with(PartFamily::Carapace, 6);
+        let mut genome = heavy.genome.clone();
+        for _ in 0..3 {
+            genome.push_part(PartKind::new(PartFamily::Bladder, PartLevel::Perfect));
+        }
+        let buoyant = OrganismState::from_genome(genome);
+        assert!(buoyant.mass > heavy.mass, "пузыри не добавили массы, тест не о том");
+        assert!(
+            movement_speed(&buoyant) > movement_speed(&heavy),
+            "пузыри не вернули скорость: {} против {}",
+            movement_speed(&buoyant),
+            movement_speed(&heavy)
+        );
+
+        // ТАРАН: масса не была оружием. Теперь — для тех, кто в неё вложился.
+        let bulky = with(PartFamily::Carapace, 6);
+        let mut genome = bulky.genome.clone();
+        genome.push_part(PartKind::new(PartFamily::Ram, PartLevel::Perfect));
+        let ramming = OrganismState::from_genome(genome);
+        assert!(
+            attack_power(&ramming) > attack_power(&bulky) * 1.2,
+            "таран почти не усиливает крупное тело"
+        );
+        // И бесполезен мелкому: он умножает вес, а не заменяет его.
+        let small_ram = with(PartFamily::Ram, 1);
+        let plain = OrganismState::default();
+        assert!(
+            attack_power(&small_ram) < attack_power(&ramming),
+            "таран одинаково хорош любому телу — значит, он не про массу"
+        );
+        assert!(attack_power(&small_ram) >= attack_power(&plain) * 0.9);
+
+        // ФИЛЬТР: в толпе нельзя было жить. Теперь есть чем ответить.
+        let filtering = with(PartFamily::Filter, 2);
+        assert!(cleansing(&filtering) > 0.0, "фильтр не чистит воду");
+        assert!(
+            filtering.toxin_resistance > plain.toxin_resistance,
+            "фильтр не добавляет стойкости"
+        );
     }
 
     /// Bodies must not be able to occupy the same water.

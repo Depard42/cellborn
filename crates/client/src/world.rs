@@ -427,9 +427,22 @@ pub fn drift_snow(
     }
 }
 
-pub fn sway_kelp(time: Res<Time>, mut kelp: Query<(&Kelp, &mut Transform)>) {
+/// Водоросли качаются только вблизи: их под две сотни, и на другом конце карты
+/// качание не видно никак.
+pub fn sway_kelp(
+    time: Res<Time>,
+    camera: Query<&GlobalTransform, With<crate::MainCamera>>,
+    mut kelp: Query<(&Kelp, &mut Transform)>,
+) {
+    let Ok(camera) = camera.single() else { return };
+    let eye = camera.translation();
+    let range_squared = FOOD_DETAIL_RANGE * FOOD_DETAIL_RANGE;
     let t = time.elapsed_secs();
+
     for (blade, mut transform) in &mut kelp {
+        if eye.distance_squared(transform.translation) > range_squared {
+            continue;
+        }
         let sway = (t * 0.8 + blade.phase).sin() * blade.bend;
         let lean = (t * 0.5 + blade.phase * 0.6).cos() * blade.bend * 0.6;
         transform.rotation = Quat::from_rotation_z(sway) * Quat::from_rotation_x(lean);
@@ -461,18 +474,55 @@ pub fn spawn_food_visuals(
     }
 }
 
+/// Дальше этого расстояния еда не шевелится и не рисуется.
+///
+/// Частиц в море больше тысячи, и каждая — сущность с собственным трансформом.
+/// Анимировать их все значит переписывать тысячу трансформов каждый кадр, в том
+/// числе за спиной у камеры: Bevy отсечёт их при отрисовке, но работу мы уже
+/// сделали, да ещё и пометили трансформы изменёнными.
+///
+/// Радиус взят с запасом к тому, что помещается на экран: пропажа частицы на
+/// краю кадра заметнее, чем любая экономия.
+const FOOD_DETAIL_RANGE: f32 = 46.0;
+
 /// Food bobs and pulses; a still glowing dot reads as UI, a moving one as life.
+///
+/// Анимируется только то, что рядом. Дальняя еда стоит на месте — на таком
+/// расстоянии её покачивание всё равно меньше пикселя.
 pub fn animate_food(
     time: Res<Time>,
-    mut food: Query<(&FoodVisual, &Nutrient, &FoodPosition, &mut Transform)>,
+    camera: Query<&GlobalTransform, With<crate::MainCamera>>,
+    mut food: Query<(&FoodVisual, &Nutrient, &FoodPosition, &mut Transform, &mut Visibility)>,
 ) {
     let t = time.elapsed_secs();
-    for (visual, nutrient, position, mut transform) in &mut food {
+    let spin = 0.4 * time.delta_secs();
+    let Ok(camera) = camera.single() else { return };
+    let eye = camera.translation();
+    let range_squared = FOOD_DETAIL_RANGE * FOOD_DETAIL_RANGE;
+
+    for (visual, nutrient, position, mut transform, mut visibility) in &mut food {
+        let near = eye.distance_squared(position.0) <= range_squared;
+
+        // Дальнюю прячем совсем: это снимает и отрисовку, и её подготовку.
+        let wanted = if near { Visibility::Inherited } else { Visibility::Hidden };
+        if *visibility != wanted {
+            *visibility = wanted;
+            // Уходя из виду, оставляем частицу на её месте — вернётся она уже
+            // без скачка.
+            if !near {
+                transform.translation = position.0;
+                transform.scale = Vec3::splat(nutrient.kind.radius());
+            }
+        }
+        if !near {
+            continue;
+        }
+
         let bob = (t * 1.3 + visual.phase).sin() * 0.12;
         let pulse = 1.0 + (t * 2.1 + visual.phase).sin() * 0.12;
         transform.translation = position.0 + Vec3::Y * bob;
         transform.scale = Vec3::splat(nutrient.kind.radius() * pulse);
-        transform.rotate_y(0.4 * time.delta_secs());
+        transform.rotate_y(spin);
     }
 }
 

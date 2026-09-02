@@ -149,7 +149,7 @@ pub fn part_color(kind: PartKind) -> Color {
         Flagellum => Color::srgb(0.86, 0.83, 0.52),
         Cilia => Color::srgb(0.80, 0.82, 0.66),
         Mouth => Color::srgb(0.82, 0.32, 0.36),
-        Eye => Color::srgb(0.16, 0.30, 0.78),
+        Ram => Color::srgb(0.16, 0.30, 0.78),
         Spike => Color::srgb(0.88, 0.90, 0.92),
         ToxinGland => Color::srgb(0.62, 0.24, 0.78),
         Osmoregulator => Color::srgb(0.30, 0.72, 0.92),
@@ -162,7 +162,9 @@ pub fn part_color(kind: PartKind) -> Color {
         Mutator => Color::srgb(0.85, 0.35, 0.85),
         Pseudopod => Color::srgb(0.70, 0.60, 0.45),
         Nematocyst => Color::srgb(0.98, 0.75, 0.30),
-        Symbiont => Color::srgb(0.45, 0.75, 0.60),
+        Filter => Color::srgb(0.45, 0.75, 0.60),
+        Holdfast => Color::srgb(0.70, 0.62, 0.45),
+        Bladder => Color::srgb(0.72, 0.86, 0.92),
         Chemoreceptor => Color::srgb(0.55, 0.80, 0.85),
         Carapace => Color::srgb(0.55, 0.55, 0.60),
     };
@@ -526,7 +528,7 @@ fn spawn_part(
                 .id();
             commands.entity(root).add_child(ring);
         }
-        PartFamily::Eye => {
+        PartFamily::Ram => {
             let ball = commands
                 .spawn((
                     Transform::from_xyz(0.0, 0.14, 0.0).with_scale(Vec3::splat(0.22)),
@@ -718,10 +720,24 @@ pub fn animate_bodies(
             Without<MouthVisual>,
         ),
     >,
+    camera: Query<&GlobalTransform, With<crate::MainCamera>>,
 ) {
     let dt = time.delta_secs().max(1e-5);
+    // Тела дальше этого расстояния не анимируются: у каждого десятки органов со
+    // своими трансформами, и биение жгутиков за горизонтом стоит ровно столько
+    // же, сколько под носом, а видно его никак.
+    let eye = camera.single().map(|c| c.translation()).unwrap_or(Vec3::ZERO);
+    const BODY_DETAIL_RANGE: f32 = 55.0;
+    let range_squared = BODY_DETAIL_RANGE * BODY_DETAIL_RANGE;
 
     for (entity, mut body, position, vitals, energy, progress, mut transform) in &mut organisms {
+        // Само тело всё равно ставим на место — иначе далёкие клетки замрут в
+        // воздухе там, где их застали.
+        if eye.distance_squared(position.0) > range_squared {
+            transform.translation = position.0;
+            body.last_position = position.0;
+            continue;
+        }
         // Velocity is measured, not simulated: presentation never writes state.
         let delta = position.0 - body.last_position;
         let measured = delta.length() / dt;

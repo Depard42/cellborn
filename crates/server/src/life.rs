@@ -430,6 +430,14 @@ pub fn pollute(
         // пачкает воду меньше, чем мелкое, но прожорливое.
         let waste = metabolic_cost(organism) * config.pollution_per_upkeep;
         field.add(position.0, waste * dt);
+
+        // Фильтры чистят воду вокруг. Это единственный способ жить в толпе и
+        // не травиться ею — и, что важнее, работает он и на соседей: чистая
+        // вода общая.
+        let cleans = cleansing(organism);
+        if cleans > 0.0 {
+            field.clean(position.0, cleans * dt);
+        }
     }
     field.settle(dt);
 }

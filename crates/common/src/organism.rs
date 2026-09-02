@@ -10,7 +10,7 @@ pub enum PartFamily {
     Flagellum,
     Cilia,
     Mouth,
-    Eye,
+    Ram,
     Spike,
     ToxinGland,
     Osmoregulator,
@@ -23,9 +23,11 @@ pub enum PartFamily {
     Mutator,
     Pseudopod,
     Nematocyst,
-    Symbiont,
+    Filter,
     Chemoreceptor,
     Carapace,
+    Holdfast,
+    Bladder,
 }
 
 /// Насколько хорошо развит орган. Один и тот же орган на четырёх уровнях.
@@ -60,13 +62,13 @@ pub struct PartKind {
 }
 
 impl PartFamily {
-    pub const ALL: [PartFamily; 20] = [
+    pub const ALL: [PartFamily; 22] = [
         PartFamily::Flagellum,
         PartFamily::Cilia,
         PartFamily::Pseudopod,
         PartFamily::Mouth,
-        PartFamily::Symbiont,
-        PartFamily::Eye,
+        PartFamily::Filter,
+        PartFamily::Holdfast,
         PartFamily::Chemoreceptor,
         PartFamily::Gill,
         PartFamily::Osmoregulator,
@@ -80,6 +82,8 @@ impl PartFamily {
         PartFamily::ToxinGland,
         PartFamily::Divisome,
         PartFamily::Mutator,
+        PartFamily::Ram,
+        PartFamily::Bladder,
         PartFamily::Membrane,
     ];
 
@@ -94,8 +98,8 @@ impl PartFamily {
             PartFamily::Cilia => 1,
             PartFamily::Pseudopod => 2,
             PartFamily::Mouth => 3,
-            PartFamily::Symbiont => 4,
-            PartFamily::Eye => 5,
+            PartFamily::Filter => 4,
+            PartFamily::Holdfast => 5,
             PartFamily::Chemoreceptor => 6,
             PartFamily::Gill => 7,
             PartFamily::Osmoregulator => 8,
@@ -109,7 +113,9 @@ impl PartFamily {
             PartFamily::ToxinGland => 16,
             PartFamily::Divisome => 17,
             PartFamily::Mutator => 18,
-            PartFamily::Membrane => 19,
+            PartFamily::Ram => 19,
+            PartFamily::Bladder => 20,
+            PartFamily::Membrane => 21,
         }
     }
 
@@ -119,7 +125,7 @@ impl PartFamily {
             PartFamily::Flagellum => "Жгутик",
             PartFamily::Cilia => "Реснички",
             PartFamily::Mouth => "Рот",
-            PartFamily::Eye => "Глаз",
+            PartFamily::Ram => "Таран",
             PartFamily::Spike => "Шип",
             PartFamily::ToxinGland => "Токсиновая железа",
             PartFamily::Osmoregulator => "Осморегулятор",
@@ -132,9 +138,11 @@ impl PartFamily {
             PartFamily::Mutator => "Мутатор",
             PartFamily::Pseudopod => "Ложноножка",
             PartFamily::Nematocyst => "Стрекало",
-            PartFamily::Symbiont => "Симбионт",
+            PartFamily::Filter => "Фильтр",
             PartFamily::Chemoreceptor => "Хеморецептор",
             PartFamily::Carapace => "Панцирь",
+            PartFamily::Holdfast => "Присоска",
+            PartFamily::Bladder => "Пузырь",
         }
     }
 
@@ -144,7 +152,7 @@ impl PartFamily {
             PartFamily::Flagellum => "+скорость, дорогой в содержании",
             PartFamily::Cilia => "+немного скорости, дёшево",
             PartFamily::Mouth => "+радиус захвата пищи",
-            PartFamily::Eye => "+дальность обзора",
+            PartFamily::Ram => "урон растёт от массы и разгона",
             PartFamily::Spike => "+урон при контакте",
             PartFamily::ToxinGland => "+стойкость к яду, отравляет воду вокруг",
             PartFamily::Osmoregulator => "+солёность",
@@ -157,9 +165,11 @@ impl PartFamily {
             PartFamily::Mutator => "потомки мутируют чаще",
             PartFamily::Pseudopod => "скорость и немного урона",
             PartFamily::Nematocyst => "много урона, хрупкое",
-            PartFamily::Symbiont => "даёт энергию, но кормится сам",
+            PartFamily::Filter => "очищает воду вокруг, стойкость к яду",
             PartFamily::Chemoreceptor => "видит еду издалека, дёшево",
             PartFamily::Carapace => "много защиты, много массы",
+            PartFamily::Holdfast => "пролезаешь в кусты, будучи крупным",
+            PartFamily::Bladder => "лёгкость: масса меньше давит на скорость",
         }
     }
 
@@ -170,13 +180,14 @@ impl PartFamily {
             PartFamily::Flagellum
                 | PartFamily::Cilia
                 | PartFamily::Mouth
-                | PartFamily::Eye
+                | PartFamily::Ram
                 | PartFamily::Spike
                 | PartFamily::MucusCoat
                 | PartFamily::ThermalMembrane
                 | PartFamily::Pseudopod
                 | PartFamily::Nematocyst
                 | PartFamily::Carapace
+                | PartFamily::Holdfast
         )
     }
 
@@ -192,7 +203,9 @@ impl PartFamily {
             Flagellum => PartStats { cost: 2, mass: 1.0, upkeep: 0.10, speed: 1.8, ..d },
             Cilia => PartStats { cost: 2, mass: 0.5, upkeep: 0.05, speed: 0.8, ..d },
             Mouth => PartStats { cost: 2, mass: 0.8, upkeep: 0.06, reach: 0.55, ..d },
-            Eye => PartStats { cost: 2, mass: 0.4, upkeep: 0.04, sense: 6.0, ..d },
+            // Таран: урон от массы, а не вместо неё. Единственный орган,
+            // который делает рост оружием — тем, кто вложился в размер.
+            Ram => PartStats { cost: 3, mass: 1.6, upkeep: 0.06, ram: 0.9, speed: -0.2, ..d },
             Spike => PartStats { cost: 3, mass: 1.2, upkeep: 0.07, speed: -0.1, attack: 7.0, ..d },
             ToxinGland => PartStats {
                 cost: 4, mass: 1.0, upkeep: 0.12, toxin: 0.10, toxin_emission: 0.06,
@@ -219,14 +232,21 @@ impl PartFamily {
             Nematocyst => PartStats {
                 cost: 5, mass: 0.7, upkeep: 0.15, attack: 12.0, defense: -0.05, ..d
             },
-            // A lodger that pays rent in energy and eats some of the pantry.
-            Symbiont => PartStats {
-                cost: 4, mass: 0.9, upkeep: 0.18, photosynthesis: 0.30, storage: -8.0, ..d
+            // Фильтр: чистит воду вокруг себя. Ответ на загрязнение от толпы —
+            // с ним можно жить там, где стоят все, и не травиться.
+            Filter => PartStats {
+                cost: 4, mass: 0.9, upkeep: 0.14, toxin: 0.09, cleansing: 0.8, ..d
             },
             Chemoreceptor => PartStats { cost: 1, mass: 0.2, upkeep: 0.02, sense: 4.0, ..d },
             Carapace => PartStats {
                 cost: 4, mass: 3.0, upkeep: 0.05, defense: 0.28, speed: -0.4, ..d
             },
+            // Присоска: позволяет крупному телу протискиваться в кусты. Ответ
+            // на то, что укрытия достаются только мелким.
+            Holdfast => PartStats { cost: 3, mass: 0.7, upkeep: 0.07, squeeze: 0.35, ..d },
+            // Пузырь: снимает часть тормоза от массы. Ответ на то, что рост
+            // всегда стоил скорости, — теперь за неё можно доплатить.
+            Bladder => PartStats { cost: 3, mass: 0.5, upkeep: 0.09, buoyancy: 0.30, ..d },
         }
     }
 }
@@ -379,6 +399,14 @@ pub struct PartStats {
     pub mutagen: f32,
     /// Toxin released into the water around the cell, per second.
     pub toxin_emission: f32,
+    /// Урон от тарана: множитель к вкладу массы в атаку.
+    pub ram: f32,
+    /// Насколько орган очищает воду вокруг тела.
+    pub cleansing: f32,
+    /// Насколько тело протискивается в кусты сверх своего размера.
+    pub squeeze: f32,
+    /// Насколько масса меньше давит на скорость.
+    pub buoyancy: f32,
 }
 
 impl PartStats {
@@ -400,6 +428,10 @@ impl PartStats {
         reproduction: 0.0,
         mutagen: 0.0,
         toxin_emission: 0.0,
+        ram: 0.0,
+        cleansing: 0.0,
+        squeeze: 0.0,
+        buoyancy: 0.0,
     };
 }
 
@@ -426,6 +458,10 @@ pub fn stats(kind: PartKind) -> PartStats {
         reproduction: base.reproduction * e,
         mutagen: base.mutagen * e,
         toxin_emission: base.toxin_emission * e,
+        ram: base.ram * e,
+        cleansing: base.cleansing * e,
+        squeeze: base.squeeze * e,
+        buoyancy: base.buoyancy * e,
     }
 }
 

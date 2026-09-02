@@ -22,13 +22,34 @@ use crate::settings::Settings;
 /// двадцать два — ровно то, что нужно, и вдвое меньше памяти.
 const RATE: u32 = 22_050;
 
-/// Пентатоника ля-минора, от неё строится всё.
+/// Лады, на которых строится музыка.
 ///
-/// Пентатоника выбрана не для красоты слова: в ней нет полутоновых трений, и
-/// **любые** её ноты, взятые вместе или подряд, звучат согласованно. Это
-/// позволяет сочинять музыку случайным выбором нот и никогда не получить
-/// фальшь — что и требовалось: «случайная расслабляющая по гармонии».
-const SCALE: [f32; 5] = [220.00, 261.63, 293.66, 329.63, 392.00];
+/// Все — пентатоники, и это не для красоты слова: в пентатонике нет полутоновых
+/// трений, и **любые** её ноты, взятые вместе или подряд, звучат согласованно.
+/// Это позволяет сочинять случайным выбором нот и никогда не сфальшивить.
+///
+/// Ладов несколько, потому что одного мало: за час игры даже безупречная
+/// гармония приедается, если она всё время одна и та же. Разные лады звучат
+/// по-разному при одном и том же способе сочинения — минорный сумрачно,
+/// мажорный светло, — и смена темы слышна, не будучи резкой.
+struct Theme {
+    name: &'static str,
+    scale: [f32; 5],
+    /// Насколько неспешно берутся ноты в этой теме.
+    pace: f32,
+}
+
+const THEMES: [Theme; 4] = [
+    // Ля-минорная: сумрачная, домашняя. С неё всё начиналось.
+    Theme { name: "глубина", scale: [220.00, 261.63, 293.66, 329.63, 392.00], pace: 1.0 },
+    // До-мажорная: светлее и выше, будто ближе к поверхности.
+    Theme { name: "мелководье", scale: [261.63, 293.66, 329.63, 392.00, 440.00], pace: 0.9 },
+    // Ре-минорная, ниже основного регистра: тяжёлая, медленная.
+    Theme { name: "течение", scale: [146.83, 174.61, 196.00, 220.00, 261.63], pace: 1.35 },
+    // Ми-минорная с широкими шагами: тревожнее прочих, но всё так же без
+    // трений — тревога здесь от регистра, а не от диссонанса.
+    Theme { name: "разлом", scale: [164.81, 196.00, 220.00, 246.94, 329.63], pace: 1.15 },
+];
 
 /// Готовые звуки события.
 #[derive(Resource)]
@@ -129,7 +150,8 @@ fn note(samples: &mut Vec<f32>, freq: f32, seconds: f32, gain: f32, attack: f32)
 /// замечать ровно тогда, когда должно.
 fn mutation_sound(seed: u64) -> Vec<u8> {
     let mut samples = vec![0.0; (RATE as f32 * 0.34) as usize];
-    let root = SCALE[(seed % SCALE.len() as u64) as usize];
+    let scale = THEMES[0].scale;
+    let root = scale[(seed % scale.len() as u64) as usize];
     note(&mut samples, root, 0.34, 0.22, 0.12);
     wav(&samples)
 }
@@ -154,8 +176,9 @@ fn division_sound() -> Vec<u8> {
 /// Никакого ритма и никакой мелодии: это фон, который не должен ни к чему
 /// звать. Случайность здесь в выборе нот, а согласованность гарантирована самой
 /// пентатоникой — сфальшивить в ней нечем.
-fn music_phrase(seed: u64) -> Vec<u8> {
-    let seconds = 11.0;
+fn music_phrase(seed: u64, theme: usize) -> Vec<u8> {
+    let theme = &THEMES[theme % THEMES.len()];
+    let seconds = 11.0 * theme.pace;
     let mut samples = vec![0.0; (RATE as f32 * seconds) as usize];
 
     // Три-четыре ноты, взятые вразнобой по времени, — «дышащий» аккорд, а не
@@ -164,7 +187,7 @@ fn music_phrase(seed: u64) -> Vec<u8> {
     let mut pick = seed;
     for voice in 0..voices {
         pick = pick.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        let step = (pick >> 33) as usize % SCALE.len();
+        let step = (pick >> 33) as usize % theme.scale.len();
         // Нижние голоса на октаву ниже: без баса фон звучит тонко.
         let octave = if voice == 0 { 0.5 } else { 1.0 };
         let start = (RATE as f32 * voice as f32 * 0.7) as usize;
@@ -172,7 +195,7 @@ fn music_phrase(seed: u64) -> Vec<u8> {
 
         let mut voice_samples = vec![0.0; (RATE as f32 * length) as usize];
         // Длинная атака — нота вплывает, а не начинается.
-        note(&mut voice_samples, SCALE[step] * octave, length, 0.11, 0.45);
+        note(&mut voice_samples, theme.scale[step] * octave, length, 0.11, 0.45);
         for (i, value) in voice_samples.iter().enumerate() {
             if let Some(slot) = samples.get_mut(start + i) {
                 *slot += value;
@@ -208,6 +231,8 @@ fn keep_music_playing(
     mut commands: Commands,
     settings: Res<Settings>,
     time: Res<Time>,
+    mut current: Local<usize>,
+    mut left_in_theme: Local<u32>,
     mut assets: ResMut<Assets<AudioSource>>,
     playing: Query<(), With<Music>>,
 ) {
@@ -217,7 +242,20 @@ fn keep_music_playing(
     }
     // Зерно из времени: у каждой фразы свой набор нот.
     let seed = (time.elapsed_secs_f64() * 1000.0) as u64;
-    let phrase = assets.add(AudioSource { bytes: music_phrase(seed).into() });
+
+    // Тема держится несколько фраз и потом сменяется. Менять её каждую фразу
+    // значило бы получить не музыку, а перебор ладов; держать вечно — то, от
+    // чего уходили.
+    if *left_in_theme == 0 {
+        *left_in_theme = 4 + (seed % 3) as u32;
+        // Следующая тема — не та же самая: повтор подряд читается как сбой.
+        let next = 1 + (seed >> 16) as usize % (THEMES.len() - 1);
+        *current = (*current + next) % THEMES.len();
+        info!("музыка: тема «{}»", THEMES[*current].name);
+    }
+    *left_in_theme -= 1;
+
+    let phrase = assets.add(AudioSource { bytes: music_phrase(seed, *current).into() });
     commands.spawn((
         Music,
         AudioPlayer(phrase),
@@ -280,7 +318,7 @@ mod tests {
     /// понять почему будет неоткуда.
     #[test]
     fn generated_wav_has_a_valid_header() {
-        for bytes in [mutation_sound(3), division_sound(), music_phrase(7)] {
+        for bytes in [mutation_sound(3), division_sound(), music_phrase(7, 0)] {
             assert!(bytes.len() > 44, "пустой звук");
             assert_eq!(&bytes[0..4], b"RIFF");
             assert_eq!(&bytes[8..12], b"WAVE");
@@ -309,9 +347,39 @@ mod tests {
     /// фразы — иначе «случайная» музыка окажется одной и той же.
     #[test]
     fn music_differs_between_phrases() {
-        let a = music_phrase(1);
-        let b = music_phrase(999);
+        let a = music_phrase(1, 0);
+        let b = music_phrase(999, 0);
         assert_ne!(a, b, "музыка не меняется от фразы к фразе");
-        assert_eq!(a.len(), b.len(), "длина фразы обязана быть постоянной");
+        assert_eq!(a.len(), b.len(), "внутри темы длина фразы обязана быть постоянной");
+    }
+
+    /// Тем должно быть несколько, и звучать они должны по-разному: одна
+    /// безупречная гармония за час приедается ровно так же, как плохая.
+    #[test]
+    fn themes_are_actually_different() {
+        assert!(THEMES.len() >= 3, "тем слишком мало, чтобы смена что-то давала");
+
+        // Разные лады — разные ноты, а не тот же набор в другом порядке.
+        for (i, a) in THEMES.iter().enumerate() {
+            for b in THEMES.iter().skip(i + 1) {
+                let same = a.scale.iter().filter(|n| b.scale.contains(n)).count();
+                assert!(same < a.scale.len(), "две темы построены на одном ладу");
+            }
+            // И каждая — настоящая пентатоника без полутоновых трений: любые
+            // две соседние ноты должны отстоять хотя бы на целый тон.
+            for pair in a.scale.windows(2) {
+                let ratio = pair[1] / pair[0];
+                assert!(
+                    ratio > 1.10,
+                    "в теме «{}» соседние ноты слишком близко — появится трение",
+                    a.name
+                );
+            }
+        }
+
+        // Фразы разных тем отличаются и по звучанию, и по длине.
+        let deep = music_phrase(5, 0);
+        let drift = music_phrase(5, 2);
+        assert_ne!(deep, drift, "разные темы звучат одинаково");
     }
 }

@@ -66,8 +66,9 @@ pub fn thorn_damage(
             continue;
         }
         let radius = body_radius(organism.mass);
-        if !Thorn::hurts(radius) {
-            // Мелкий проходит насквозь: в этом весь смысл колючки.
+        if !Thorn::hurts_with(radius, squeeze(&organism)) {
+            // Мелкий проходит насквозь — и крупный с присосками тоже: в этом
+            // весь смысл колючки как укрытия, а не как стены.
             continue;
         }
         if thorns.iter().any(|thorn| thorn.touches(position.0, radius)) {

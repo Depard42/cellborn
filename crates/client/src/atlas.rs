@@ -167,7 +167,7 @@ pub fn rebuild_preview(
                 material.clone(), Transform::from_rotation(Quat::from_rotation_x(0.5)),
             );
         }
-        PartFamily::Eye | PartFamily::Chemoreceptor => {
+        PartFamily::Ram | PartFamily::Chemoreceptor => {
             spawn_child(
                 &mut commands, root, meshes.add(Sphere::new(1.0).mesh().uv(20, 14)),
                 materials.add(StandardMaterial {

@@ -154,6 +154,12 @@ impl PollutionField {
         self.levels[index] = (self.levels[index] + amount).min(1.0);
     }
 
+    /// Убирает грязь в точке: работа фильтров.
+    pub fn clean(&mut self, position: Vec3, amount: f32) {
+        let index = Pollution::index(position);
+        self.levels[index] = (self.levels[index] - amount).max(0.0);
+    }
+
     pub fn at(&self, position: Vec3) -> f32 {
         self.levels[Pollution::index(position)]
     }
