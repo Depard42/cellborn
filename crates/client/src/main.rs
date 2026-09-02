@@ -98,7 +98,11 @@ fn main() {
     app.add_plugins(discovery::plugin);
     app.add_systems(Startup, (setup_camera, world::setup_world, atlas::setup_preview));
     app.add_systems(OnEnter(Screen::Game), (ui::setup_hud, connect_client));
-    app.add_systems(OnExit(Screen::Game), menu::despawn::<ui::GameUi>);
+    // Выходя в меню, рвём соединение и убираем сетевого клиента. Без этого
+    // повторный вход создавал ВТОРОГО клиента поверх первого: подключение
+    // ломалось, игра навсегда оставалась на «Подключение…», и выйти из меню
+    // обратно в игру было уже нельзя — только перезапуск.
+    app.add_systems(OnExit(Screen::Game), (menu::despawn::<ui::GameUi>, disconnect_client));
     app.add_systems(
         Update,
         (
@@ -183,6 +187,16 @@ fn connect_client(mut commands: Commands, server: Res<ServerAddress>) {
         .id();
     commands.trigger(Connect { entity: client });
     info!("Connecting to {}", server.0);
+}
+
+/// Закрывает соединение и убирает клиента при выходе в меню.
+fn disconnect_client(mut commands: Commands, clients: Query<Entity, With<Client>>) {
+    for entity in &clients {
+        // Сначала вежливо прощаемся, потом убираем сущность: сервер должен
+        // узнать об уходе, а не ждать таймаута.
+        commands.trigger(Disconnect { entity });
+        commands.entity(entity).despawn();
+    }
 }
 
 fn buffer_input(

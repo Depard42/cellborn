@@ -47,11 +47,15 @@ pub const CORPSE_NUTRIENTS: usize = 6;
 
 /// How much each part already in the body raises the price of the next one.
 ///
-/// Growth is linear plus quadratic: the first few organs are cheap, a twentieth
-/// one costs many times its base price. Without this the late game is just
-/// "buy everything".
-pub const MUTATION_PRICE_LINEAR: f32 = 0.18;
-pub const MUTATION_PRICE_QUADRATIC: f32 = 0.012;
+/// Рост цены линейный. Был линейный плюс квадратичный, и это и делало прокачку
+/// резкой: к двадцатому органу цена вырастала всемеро, и развитие упиралось в
+/// стену ровно тогда, когда игрок начинал понимать, что вообще хочет построить.
+///
+/// Смысл надбавки не в том, чтобы остановить рост, а в том, чтобы двадцатый
+/// орган стоил дороже третьего — иначе поздняя игра сводится к «купи всё».
+/// Линейного роста для этого достаточно.
+pub const MUTATION_PRICE_LINEAR: f32 = 0.14;
+pub const MUTATION_PRICE_QUADRATIC: f32 = 0.0;
 
 /// Minimum seconds between two accepted mutation requests from one client.
 pub const MUTATION_COOLDOWN: f32 = 0.25;

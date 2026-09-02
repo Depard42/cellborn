@@ -34,7 +34,6 @@ const SCALE: [f32; 5] = [220.00, 261.63, 293.66, 329.63, 392.00];
 #[derive(Resource)]
 pub struct Sounds {
     pub mutation: Handle<AudioSource>,
-    pub cloud: Handle<AudioSource>,
     pub division: Handle<AudioSource>,
 }
 
@@ -49,7 +48,6 @@ pub struct OneShot;
 /// Что клиент видел в прошлый кадр — чтобы отличить событие от состояния.
 #[derive(Resource, Default)]
 struct Seen {
-    clouds: usize,
     divisions: u32,
     parts: usize,
 }
@@ -123,43 +121,16 @@ fn note(samples: &mut Vec<f32>, freq: f32, seconds: f32, gain: f32, attack: f32)
     }
 }
 
-/// Звук выросшего органа: две ноты вверх, мягко.
-fn mutation_sound(seed: u64) -> Vec<u8> {
-    let mut samples = vec![0.0; (RATE as f32 * 0.42) as usize];
-    let root = SCALE[(seed % SCALE.len() as u64) as usize];
-    note(&mut samples, root, 0.42, 0.24, 0.10);
-    // Вторая нота вступает со сдвигом — восходящий шаг читается как «выросло».
-    let mut upper = vec![0.0; (RATE as f32 * 0.30) as usize];
-    note(&mut upper, root * 1.5, 0.30, 0.18, 0.12);
-    let offset = (RATE as f32 * 0.10) as usize;
-    for (i, value) in upper.iter().enumerate() {
-        if let Some(slot) = samples.get_mut(offset + i) {
-            *slot += value;
-        }
-    }
-    wav(&samples)
-}
-
-/// Появление ядовитого облака: низкий выдох, без тона.
+/// Звук выросшего органа: одна нота, мягко.
 ///
-/// Шум, а не нота, намеренно: опасность не должна звучать музыкально, иначе она
-/// теряется в общей гармонии, ради которой всё и затевалось.
-fn cloud_sound() -> Vec<u8> {
-    let count = (RATE as f32 * 0.7) as usize;
-    let mut samples = Vec::with_capacity(count);
-    // Простой генератор шума: своя формула вместо зависимости.
-    let mut state = 0x2545_F491_4F6C_DD1Du64;
-    let mut smoothed = 0.0f32;
-    for i in 0..count {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        let white = ((state >> 40) as f32 / 8_388_608.0) - 1.0;
-        // Сглаживание превращает шипение в глухой выдох.
-        smoothed = smoothed * 0.93 + white * 0.07;
-        let position = i as f32 / count as f32;
-        samples.push(smoothed * envelope(position, 0.25) * 2.4);
-    }
+/// Была пара нот восходящим шагом — «выросло». Но орган растят часто, и на
+/// десятый раз двухнотная фигура начинает звучать как мелодия, которую тебе
+/// играют против воли. Одна нота — это отметка о событии, и её ухо перестаёт
+/// замечать ровно тогда, когда должно.
+fn mutation_sound(seed: u64) -> Vec<u8> {
+    let mut samples = vec![0.0; (RATE as f32 * 0.34) as usize];
+    let root = SCALE[(seed % SCALE.len() as u64) as usize];
+    note(&mut samples, root, 0.34, 0.22, 0.12);
     wav(&samples)
 }
 
@@ -225,7 +196,6 @@ fn music_phrase(seed: u64) -> Vec<u8> {
 fn load_sounds(mut commands: Commands, mut assets: ResMut<Assets<AudioSource>>) {
     commands.insert_resource(Sounds {
         mutation: assets.add(AudioSource { bytes: mutation_sound(0).into() }),
-        cloud: assets.add(AudioSource { bytes: cloud_sound().into() }),
         division: assets.add(AudioSource { bytes: division_sound().into() }),
     });
 }
@@ -265,22 +235,14 @@ fn watch_events(
     settings: Res<Settings>,
     sounds: Option<Res<Sounds>>,
     mut seen: ResMut<Seen>,
-    clouds: Query<(), With<ToxinCloud>>,
     mine: Query<(&PlayerProgress, &PlayerGenome), With<Controlled>>,
 ) {
     let Some(sounds) = sounds else { return };
     let gain = settings.effect_gain();
 
-    let clouds_now = clouds.iter().count();
-    // Только появление: исчезновение облака звука не заслуживает.
-    if clouds_now > seen.clouds && gain > 0.0 {
-        commands.spawn((
-            OneShot,
-            AudioPlayer(sounds.cloud.clone()),
-            PlaybackSettings::DESPAWN.with_volume(Volume::Linear(gain * 0.8)),
-        ));
-    }
-    seen.clouds = clouds_now;
+    // Появление облака звука не имеет намеренно. Облака возникают по всей
+    // карте и постоянно, в том числе далеко от игрока: любой звук на это
+    // превращался бы в непрерывное шипение ни о чём.
 
     let Ok((progress, genome)) = mine.single() else {
         // Тела нет — сбрасываем память, иначе после возрождения прилетит залп
@@ -318,7 +280,7 @@ mod tests {
     /// понять почему будет неоткуда.
     #[test]
     fn generated_wav_has_a_valid_header() {
-        for bytes in [mutation_sound(3), cloud_sound(), division_sound(), music_phrase(7)] {
+        for bytes in [mutation_sound(3), division_sound(), music_phrase(7)] {
             assert!(bytes.len() > 44, "пустой звук");
             assert_eq!(&bytes[0..4], b"RIFF");
             assert_eq!(&bytes[8..12], b"WAVE");

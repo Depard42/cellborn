@@ -75,8 +75,9 @@ pub enum Stage {
     UpToDate,
     Available(Box<Release>),
     Downloading,
-    /// Установлено. Дальше нужен перезапуск — заменять себя на ходу нельзя.
-    Installed(String),
+    /// Установлено. Дальше перезапуск: заменять себя на ходу нельзя.
+    /// Число — сколько секунд осталось до автоматического.
+    Installed(String, f32),
     Failed(String),
 }
 
@@ -117,7 +118,7 @@ impl Updater {
                     format!("СКАЧИВАЮ {} МБ", done / 1_048_576)
                 }
             }
-            Stage::Installed(_) => "ПЕРЕЗАПУСТИ ИГРУ".into(),
+            Stage::Installed(_, left) => format!("ПЕРЕЗАПУСК ЧЕРЕЗ {:.0}", left.max(0.0)),
         }
     }
 
@@ -137,8 +138,8 @@ impl Updater {
                 }
             }
             Stage::Downloading => "качаю комплект; настройки сервера не тронутся".into(),
-            Stage::Installed(tag) => {
-                format!("{tag} установлена. Закрой игру и запусти заново")
+            Stage::Installed(tag, _) => {
+                format!("{tag} установлена; игра перезапустится сама. Нажми, чтобы не ждать")
             }
             Stage::Failed(why) => format!("не вышло: {why}"),
         }
@@ -152,7 +153,7 @@ fn first_line(text: &str) -> String {
 pub fn plugin(app: &mut App) {
     app.init_resource::<Updater>();
     app.add_systems(Startup, sweep_old_files);
-    app.add_systems(Update, collect_reports);
+    app.add_systems(Update, (collect_reports, tick_restart).chain());
 }
 
 /// Убирает `.old`, оставшиеся от прошлого обновления.
@@ -183,7 +184,7 @@ fn collect_reports(mut updater: ResMut<Updater>) {
             updater.stage = Stage::Available(Box::new(release));
         }
         Report::Checked(None) => updater.stage = Stage::UpToDate,
-        Report::Installed(tag) => updater.stage = Stage::Installed(tag),
+        Report::Installed(tag) => updater.stage = Stage::Installed(tag, RESTART_DELAY),
         Report::Failed(why) => {
             warn!("обновление: {why}");
             updater.stage = Stage::Failed(why);
@@ -196,8 +197,55 @@ pub fn act(updater: &mut Updater) {
     match updater.stage.clone() {
         Stage::Idle | Stage::UpToDate | Stage::Failed(_) => start_check(updater),
         Stage::Available(release) => start_install(updater, *release),
-        // Идёт работа или уже установлено — жать больше не на что.
-        Stage::Checking | Stage::Downloading | Stage::Installed(_) => {}
+        // Установлено — перезапускаем немедленно, не дожидаясь отсчёта.
+        Stage::Installed(..) => restart(),
+        // Идёт работа: жать не на что.
+        Stage::Checking | Stage::Downloading => {}
+    }
+}
+
+/// Сколько секунд игрок видит «установлено», прежде чем игра перезапустится.
+///
+/// Не ноль: мгновенно исчезающее окно выглядит как падение, а не как
+/// обновление. Несколько секунд — достаточно, чтобы прочитать, что произошло.
+const RESTART_DELAY: f32 = 4.0;
+
+/// Ведёт отсчёт и перезапускает игру, когда он вышел.
+fn tick_restart(time: Res<Time>, mut updater: ResMut<Updater>) {
+    let Stage::Installed(tag, left) = &mut updater.stage else { return };
+    *left -= time.delta_secs();
+    if *left <= 0.0 {
+        info!("обновление {tag} установлено, перезапускаюсь");
+        restart();
+    }
+}
+
+/// Запускает новую версию и уходит.
+///
+/// Работает потому, что обновлятор кладёт новый бинарник **по тому же пути**, а
+/// старый отодвигает в `.old`. То есть `current_exe()` уже указывает на новую
+/// версию, и достаточно запустить её же ещё раз.
+///
+/// Если запустить не вышло — просто закрываемся. Игрок откроет игру сам и
+/// получит новую версию: она уже на диске, ничего не потеряно.
+fn restart() {
+    match std::env::current_exe() {
+        Ok(exe) => {
+            let mut command = std::process::Command::new(&exe);
+            // Аргументы переносим: игрок мог запуститься с адресом сервера.
+            command.args(std::env::args().skip(1));
+            if let Some(dir) = exe.parent() {
+                command.current_dir(dir);
+            }
+            match command.spawn() {
+                Ok(_) => std::process::exit(0),
+                Err(error) => {
+                    warn!("не смог перезапуститься ({error}); закрываюсь, запусти игру заново");
+                    std::process::exit(0);
+                }
+            }
+        }
+        Err(error) => warn!("не понял, чем себя перезапустить: {error}"),
     }
 }
 

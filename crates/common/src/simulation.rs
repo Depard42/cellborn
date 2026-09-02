@@ -486,20 +486,45 @@ mod tests {
         }
     }
 
-    /// Each organ has to make the next one dearer, or the late game is a shopping list.
+    /// Рост тела обязан дорожать, иначе поздняя игра — список покупок.
+    ///
+    /// Цена не обязана расти на **каждом** органе: строгий рост держался
+    /// плоской надбавкой, и она же делала прокачку резкой. Требуется другое —
+    /// чтобы она никогда не падала и заметно росла на дистанции.
     #[test]
-    fn every_mutation_raises_the_price_of_the_next() {
+    fn growth_gets_dearer_as_the_body_fills_up() {
         let kind = PartKind::basic(PartFamily::Spike);
         let mut genome = Genome::starter();
-        let mut previous = crate::mutation_price(&genome, kind);
+        let start = crate::mutation_price(&genome, kind);
+        let mut previous = start;
+
         for _ in 0..8 {
             genome.push_part(PartKind::basic(PartFamily::Cilia));
             let price = crate::mutation_price(&genome, kind);
-            assert!(price > previous, "цена должна расти: {previous} -> {price}");
+            assert!(price >= previous, "цена подешевела: {previous} -> {price}");
             previous = price;
         }
-        // A well-grown body pays several times the base price.
-        assert!(previous >= stats(kind).cost * 2);
+        assert!(previous > start, "за восемь органов цена не выросла вовсе");
+        // Развитое тело платит заметно больше базовой цены.
+        assert!(previous >= stats(kind).cost * 2, "поздний орган стоит не дороже раннего");
+
+        // И темп при этом посильный: путь до двадцати органов не должен стоить
+        // втрое дороже пути до десяти в пересчёте на орган.
+        let cost_to = |count: usize| {
+            let mut genome = Genome::starter();
+            let mut total = 0u32;
+            for _ in 3..count {
+                total += crate::mutation_price(&genome, kind) as u32;
+                genome.push_part(PartKind::basic(PartFamily::Cilia));
+            }
+            total
+        };
+        let per_organ_10 = cost_to(10) as f32 / 7.0;
+        let per_organ_20 = cost_to(20) as f32 / 17.0;
+        assert!(
+            per_organ_20 < per_organ_10 * 2.0,
+            "темп слишком резкий: {per_organ_10:.1} -> {per_organ_20:.1} очков за орган"
+        );
     }
 
     /// A lineage is not a permanent truce: a branch that drifted far enough

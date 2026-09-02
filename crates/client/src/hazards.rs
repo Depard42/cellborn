@@ -32,7 +32,23 @@ const SHELTER: Color = Color::srgb(0.36, 0.78, 0.52);
 /// Цвет колючки, которая тебя порежет.
 const HAZARD: Color = Color::srgb(0.95, 0.42, 0.30);
 
+/// Сколько пятен мути показывать одновременно.
+///
+/// Пул фиксированного размера: клеток загрязнения четыре сотни, и рисовать
+/// каждую значило бы четыреста прозрачных объектов ради того, что читается и
+/// десятком. Показываем самые грязные, остальные и так ниже порога заметности.
+const MURK_BLOBS: usize = 40;
+
+/// Ниже этого уровня грязь не рисуется: чуть запачканная вода выглядит чистой,
+/// и это правда — она не наносит урона.
+const MURK_FLOOR: f32 = 0.18;
+
+/// Одно пятно мути из пула.
+#[derive(Component)]
+pub struct Murk;
+
 pub fn plugin(app: &mut App) {
+    app.add_systems(Startup, spawn_murk_pool);
     app.add_systems(
         Update,
         (
@@ -42,9 +58,87 @@ pub fn plugin(app: &mut App) {
             animate_leviathans,
             spawn_feast_visuals,
             animate_feasts,
+            show_pollution,
         )
             .chain(),
     );
+}
+
+/// Пул пятен создаётся один раз и потом только переставляется.
+///
+/// Грязь меняется каждые полсекунды по всей карте; создавать и уничтожать под
+/// это сущности значило бы дёргать мир сотнями команд в секунду.
+fn spawn_murk_pool(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let mesh = meshes.add(Sphere::new(1.0).mesh().uv(12, 8));
+    for _ in 0..MURK_BLOBS {
+        commands.spawn((
+            Murk,
+            Transform::from_scale(Vec3::ZERO),
+            Visibility::Hidden,
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                // Болотная муть: бурая взвесь, а не зелёный туман. Она должна
+                // читаться как «вода испорчена», а не как ещё одна подсветка.
+                base_color: Color::srgba(0.26, 0.30, 0.16, 0.16),
+                emissive: LinearRgba::new(0.04, 0.05, 0.01, 1.0),
+                alpha_mode: AlphaMode::Blend,
+                perceptual_roughness: 1.0,
+                ..default()
+            })),
+            NotShadowCaster,
+        ));
+    }
+}
+
+/// Переставляет пятна мути на самые грязные клетки.
+///
+/// Без этого загрязнение было чистой абстракцией: игрок терял здоровье в
+/// толпе и не понимал, за что. Теперь вода вокруг скопления буреет, и причина
+/// видна раньше, чем начинает падать полоска.
+fn show_pollution(
+    pollution: Query<&Pollution>,
+    time: Res<Time>,
+    mut blobs: Query<(&mut Transform, &mut Visibility), With<Murk>>,
+) {
+    let Ok(pollution) = pollution.single() else { return };
+
+    // Самые грязные клетки: частичная сортировка по уровню.
+    let mut worst: Vec<(u8, usize)> = pollution
+        .cells
+        .iter()
+        .enumerate()
+        .filter(|(_, level)| **level as f32 / 255.0 >= MURK_FLOOR)
+        .map(|(index, level)| (*level, index))
+        .collect();
+    worst.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+
+    let breathe = 1.0 + (time.elapsed_secs() * 0.35).sin() * 0.06;
+    for (slot, (mut transform, mut visibility)) in blobs.iter_mut().enumerate() {
+        match worst.get(slot) {
+            Some((level, index)) => {
+                let (x, z) = (index % POLLUTION_SIDE, index / POLLUTION_SIDE);
+                // Центр клетки в мировых координатах.
+                let position = Vec3::new(
+                    (x as f32 + 0.5) * POLLUTION_CELL - ARENA_HALF_EXTENT,
+                    // Чуть выше дна: муть висит в воде, а не лежит на грунте.
+                    0.4,
+                    (z as f32 + 0.5) * POLLUTION_CELL - ARENA_HALF_EXTENT,
+                );
+                let strength = *level as f32 / 255.0;
+                transform.translation = position;
+                // Грязнее — крупнее и заметнее. Размер чуть больше клетки,
+                // чтобы соседние пятна сливались в одно облако, а не в шахматы.
+                transform.scale =
+                    Vec3::splat(POLLUTION_CELL * (0.5 + strength * 0.45) * breathe);
+                *visibility = Visibility::Inherited;
+            }
+            None => *visibility = Visibility::Hidden,
+        }
+    }
 }
 
 fn spawn_thorn_visuals(

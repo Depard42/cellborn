@@ -619,16 +619,27 @@ pub fn hostile_counts(
 /// What the next organ costs in this particular body.
 ///
 /// The base price comes from the part; the multiplier comes from how much has
-/// already been grown, so every mutation makes the following one dearer.
+/// already been grown, so growth gets dearer as the body fills up.
+///
+/// Цена **не убывает** и заметно растёт на дистанции, но не обязана
+/// увеличиваться на каждом отдельном органе. Раньше строгий рост держался
+/// плоской надбавкой `+ grown`, и она же незаметно стала главным источником
+/// крутизны: к пятидесятому органу из ста пятидесяти пяти очков сорок семь
+/// давал множитель и сорок семь — она сама. Игрок упирался в стену ровно
+/// тогда, когда начинал понимать, что хочет построить.
+///
+/// Смысл надбавки не в том, чтобы остановить рост, а в том, чтобы поздние
+/// органы стоили ощутимо дороже ранних. Для этого достаточно множителя.
 pub fn mutation_price(genome: &Genome, kind: PartKind) -> u16 {
     let base = stats(kind).cost as f32;
     // The three starter organs are free of the surcharge.
     let grown = genome.parts.len().saturating_sub(3) as f32;
     let scale = 1.0 + MUTATION_PRICE_LINEAR * grown + MUTATION_PRICE_QUADRATIC * grown * grown;
-    // The flat `+ grown` guarantees the price is *strictly* rising: without it
-    // rounding makes two consecutive organs cost the same, and "every mutation
-    // is dearer than the last" stops being true.
-    ((base * scale).ceil() as u16 + grown as u16).max(1)
+    // Плоская надбавка гарантирует, что цена растёт **строго**: без неё
+    // округление делает два подряд идущих органа одинаковыми по цене, и
+    // «каждая мутация дороже предыдущей» перестаёт быть правдой.
+    //
+    (base * scale).ceil().max(1.0) as u16
 }
 
 /// Deterministic attachment slot on the membrane, spread by the golden angle so
