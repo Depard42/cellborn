@@ -137,6 +137,9 @@ pub struct MutationPanel;
 #[derive(Resource, Default)]
 pub struct MutationSelection {
     pub family: usize,
+    /// Какой уровень выбран на геймпаде: на клавиатуре его задают цифрой, а на
+    /// геймпаде цифр нет, и выбор приходится держать.
+    pub level: usize,
 }
 
 #[derive(Component)]
@@ -658,9 +661,11 @@ pub fn update_death_overlay(
 
 pub fn toggle_mutation_panel(
     keys: Res<ButtonInput<KeyCode>>,
+    pads: Query<&Gamepad>,
     mut panel: Query<&mut Node, With<MutationPanel>>,
 ) {
-    if !keys.just_pressed(KeyCode::Tab) {
+    let pad = pads.iter().any(|pad| pad.just_pressed(GamepadButton::Select));
+    if !keys.just_pressed(KeyCode::Tab) && !pad {
         return;
     }
     for mut node in &mut panel {
@@ -794,29 +799,33 @@ pub fn update_mutation_panel(
 /// Отдельно от панели мутаций: это не мутации, а решения о том, кем играть.
 pub fn control_input(
     keys: Res<ButtonInput<KeyCode>>,
+    pads: Query<&Gamepad>,
     mode: Res<crate::CameraMode>,
     mut sender: Query<&mut MessageSender<MutationRequest>, With<Client>>,
 ) {
     let Ok(mut sender) = sender.single_mut() else { return };
 
-    // R — пересесть в самого развитого потомка.
-    if keys.just_pressed(KeyCode::KeyR) {
-        sender.send::<GameplayChannel>(MutationRequest::TakeOverOffspring);
-    }
+    // Кнопки геймпада разложены по смыслу, а не по порядку: способности на
+    // лицевые кнопки под большим пальцем, всё остальное — дальше.
+    let pad_pressed = |button: GamepadButton| pads.iter().any(|pad| pad.just_pressed(button));
 
-    // Q и E — способности. Не в панели мутаций: перк это решение в конкретную
-    // секунду, а не покупка, и лезть за ним в меню значит не успеть.
-    if keys.just_pressed(KeyCode::KeyZ) {
+    // Z / квадрат — Спрут. X / треугольник — Продолжение рода.
+    if keys.just_pressed(KeyCode::KeyZ) || pad_pressed(GamepadButton::West) {
         sender.send::<GameplayChannel>(MutationRequest::UsePerk(Perk::Squid));
     }
-    if keys.just_pressed(KeyCode::KeyX) {
+    if keys.just_pressed(KeyCode::KeyX) || pad_pressed(GamepadButton::North) {
         sender.send::<GameplayChannel>(MutationRequest::UsePerk(Perk::Lineage));
+    }
+
+    // R — пересесть в самого развитого потомка.
+    if keys.just_pressed(KeyCode::KeyR) || pad_pressed(GamepadButton::East) {
+        sender.send::<GameplayChannel>(MutationRequest::TakeOverOffspring);
     }
 
     // F переключает камеру, и вместе с ней — кто ведёт тело. Уходя в свободный
     // полёт, игрок отдаёт тело боту: оно продолжает жить, а не замирает
     // посреди моря беспомощным.
-    if keys.just_pressed(KeyCode::KeyF) {
+    if keys.just_pressed(KeyCode::KeyF) || pad_pressed(GamepadButton::RightThumb) {
         let request = match *mode {
             crate::CameraMode::Free { .. } => MutationRequest::HandOverToBot,
             crate::CameraMode::Follow => MutationRequest::TakeBackControl,
@@ -828,14 +837,19 @@ pub fn control_input(
 /// Q / E switch families, digits pick a variant, clicks do both.
 pub fn mutation_navigation(
     keys: Res<ButtonInput<KeyCode>>,
+    pads: Query<&Gamepad>,
     mut selection: ResMut<MutationSelection>,
     tabs: Query<(&Interaction, &FamilyTab), Changed<Interaction>>,
 ) {
     let count = PartFamily::ALL.len();
-    if keys.just_pressed(KeyCode::KeyQ) {
+    // Курки листают органы: под указательным пальцем, не отрывая большого от
+    // стика.
+    let pad_prev = pads.iter().any(|p| p.just_pressed(GamepadButton::LeftTrigger));
+    let pad_next = pads.iter().any(|p| p.just_pressed(GamepadButton::RightTrigger));
+    if keys.just_pressed(KeyCode::KeyQ) || pad_prev {
         selection.family = (selection.family + count - 1) % count;
     }
-    if keys.just_pressed(KeyCode::KeyE) {
+    if keys.just_pressed(KeyCode::KeyE) || pad_next {
         selection.family = (selection.family + 1) % count;
     }
     for (interaction, tab) in &tabs {
@@ -848,7 +862,8 @@ pub fn mutation_navigation(
 /// Sends a mutation request. The client asks; the server decides.
 pub fn mutation_input(
     keys: Res<ButtonInput<KeyCode>>,
-    selection: Res<MutationSelection>,
+    pads: Query<&Gamepad>,
+    mut selection: ResMut<MutationSelection>,
     cards: Query<(&Interaction, &VariantCard), Changed<Interaction>>,
     mut sender: Query<&mut MessageSender<MutationRequest>, With<Client>>,
 ) {
@@ -866,6 +881,19 @@ pub fn mutation_input(
     for (index, key) in DIGITS.iter().enumerate() {
         if keys.just_pressed(*key) {
             wanted = Some(index);
+        }
+    }
+    // Крестик подтверждает выбранный уровень: на геймпаде цифр нет, а листать
+    // уровни можно бамперами.
+    for pad in &pads {
+        if pad.just_pressed(GamepadButton::South) {
+            wanted = Some(selection.level.min(PartLevel::ALL.len()));
+        }
+        if pad.just_pressed(GamepadButton::LeftTrigger2) && selection.level > 0 {
+            selection.level -= 1;
+        }
+        if pad.just_pressed(GamepadButton::RightTrigger2) {
+            selection.level = (selection.level + 1).min(PartLevel::ALL.len());
         }
     }
     for (interaction, card) in &cards {

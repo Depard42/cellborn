@@ -558,6 +558,7 @@ pub fn divide(
 pub fn deaths(
     mut commands: Commands,
     config: Res<ServerConfig>,
+    mut memory: ResMut<crate::evolution::Heredity>,
     mut query: Query<(
         Entity,
         &PlayerPosition,
@@ -609,6 +610,10 @@ pub fn deaths(
             if brain.is_some() { "" } else { " (игрок)" }
         );
         if brain.is_some() {
+            // Прожитое ботом идёт в наследственную память: это единственная
+            // мера успеха, какая здесь возможна, и она честная — её поставила
+            // сама игра, а не формула приспособленности.
+            memory.remember(organism.age, &organism.genome);
             commands.entity(entity).despawn();
         } else {
             progress.dead = true;

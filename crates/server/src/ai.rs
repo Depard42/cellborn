@@ -38,6 +38,7 @@ pub fn maintain_wild(
     mut commands: Commands,
     config: Res<ServerConfig>,
     time: Res<Time>,
+    memory: Res<crate::evolution::Heredity>,
     wild: Query<&Brain>,
     census: Query<&PlayerGenome>,
     mut since: Local<f32>,
@@ -56,11 +57,11 @@ pub fn maintain_wild(
     }
     let mut rng = rand::rng();
     // A distinct lineage per wild cell: they are strangers to each other too.
-    let mut genome = Genome::starter_of(rng.random::<u64>());
-    // Wild cells start slightly varied, so the world is not full of clones.
-    for _ in 0..rng.random_range(0..3) {
-        genome.push_part(random_part(rng.random::<u64>()));
-    }
+    //
+    // Тело собирает наследственная память: чаще всего это потомок того, кто уже
+    // сумел прожить в этом море долго, с одной случайной правкой. Отбор делает
+    // сама игра — выжившими считаются те, кто действительно выжил.
+    let genome = memory.propose(rng.random::<u64>(), rng.random::<u64>());
     let state = OrganismState::from_genome(genome);
     spawn_organism(&mut commands, state, random_position(), None, Some(Brain::Wild));
 }

@@ -1,6 +1,7 @@
 mod ai;
 mod config;
 mod discovery;
+mod evolution;
 mod grid;
 mod hazards;
 mod life;
@@ -65,6 +66,8 @@ impl Plugin for ServerGamePlugin {
         app.insert_resource(ReplicationMetadata::new(SEND_INTERVAL));
         app.init_resource::<RequestCooldowns>();
         app.init_resource::<ControlRequests>();
+        app.init_resource::<AbandonedBodies>();
+        app.insert_resource(evolution::load());
         app.init_resource::<FoodGrid>();
         app.init_resource::<TickClock>();
         app.init_resource::<PollutionField>();
@@ -124,6 +127,8 @@ impl Plugin for ServerGamePlugin {
                 // Что об этом узнают наружу.
                 (
                     census_log,
+                    expire_abandoned,
+                    evolution::save_periodically,
                     project_state,
                     life::project_pollution,
                     broadcast_state,
@@ -140,6 +145,7 @@ impl Plugin for ServerGamePlugin {
         );
         app.add_observer(on_new_client);
         app.add_observer(on_connected);
+        app.add_observer(on_disconnected);
     }
 }
 
@@ -187,12 +193,46 @@ fn on_new_client(trigger: On<Add, LinkOf>, mut commands: Commands) {
     commands.entity(trigger.entity).insert((ReplicationSender, Name::new("Client")));
 }
 
+/// Тела ушедших игроков: кому они принадлежали и сколько им ещё ждать.
+///
+/// Игрок, у которого оборвалась связь, не должен терять всё нажитое. Его тело
+/// остаётся в море и живёт ботом, а место за ним держится: вернулся вовремя —
+/// сел обратно в своё, а не начал с нуля.
+#[derive(Resource, Default)]
+struct AbandonedBodies(HashMap<u64, (Entity, f32)>);
+
+/// Сколько держать место за ушедшим.
+///
+/// Достаточно, чтобы пережить обрыв связи и перезапуск игры, и мало, чтобы
+/// брошенные тела не копились навсегда: после этого срока тело просто остаётся
+/// колонии, как любое другое.
+const RECONNECT_GRACE: f32 = 300.0;
+
 fn on_connected(
     trigger: On<Add, Connected>,
     clients: Query<&RemoteId, With<ClientOf>>,
+    mut abandoned: ResMut<AbandonedBodies>,
     mut commands: Commands,
 ) {
     let Ok(remote) = clients.get(trigger.entity) else { return; };
+
+    // Вернулся вовремя — садится обратно в своё тело. Оно всё это время жило
+    // ботом, могло вырасти или похудеть, но оно то же самое.
+    if let Some((entity, _)) = abandoned.0.remove(&remote.0.to_bits()) {
+        if let Ok(mut body) = commands.get_entity(entity) {
+            body.remove::<life::Brain>();
+            body.remove::<life::BotState>();
+            body.insert((
+                PlayerId(remote.0),
+                PredictionTarget::to_clients(NetworkTarget::Single(remote.0)),
+                InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(remote.0)),
+                ControlledBy { owner: trigger.entity, lifetime: Default::default() },
+            ));
+            info!("{:?} вернулся в своё тело", remote.0);
+            return;
+        }
+    }
+
     // Every player is the founder of their own line: their offspring will never
     // attack them, and they can take over one of them when they die.
     let lineage = rand::rng().random::<u64>();
@@ -205,6 +245,47 @@ fn on_connected(
         None,
     );
     info!("Organism spawned for {:?} (lineage {lineage:x})", remote.0);
+}
+
+/// Игрок ушёл — тело остаётся.
+///
+/// Раньше вместе с игроком пропадало и всё, что он вырастил: обрыв связи стоил
+/// часа игры. Теперь тело переходит под управление бота и продолжает жить в
+/// море, а место за ним держится [`RECONNECT_GRACE`] секунд.
+fn on_disconnected(
+    trigger: On<Remove, Connected>,
+    clients: Query<&RemoteId, With<ClientOf>>,
+    bodies: Query<(Entity, &PlayerId)>,
+    mut abandoned: ResMut<AbandonedBodies>,
+    mut commands: Commands,
+) {
+    let Ok(remote) = clients.get(trigger.entity) else { return };
+    let Some((entity, _)) = bodies.iter().find(|(_, id)| id.0 == remote.0) else { return };
+
+    commands
+        .entity(entity)
+        .remove::<PlayerId>()
+        .remove::<ControlledBy>()
+        .remove::<PredictionTarget>()
+        .remove::<PlayerEnergy>()
+        .remove::<PlayerPerks>()
+        .insert((
+            life::Brain::Colony,
+            life::BotState::default(),
+            InterpolationTarget::to_clients(NetworkTarget::All),
+        ));
+
+    abandoned.0.insert(remote.0.to_bits(), (entity, RECONNECT_GRACE));
+    info!("{:?} ушёл; тело осталось в море", remote.0);
+}
+
+/// Отпускает места, за которыми никто не вернулся.
+fn expire_abandoned(time: Res<Time>, mut abandoned: ResMut<AbandonedBodies>) {
+    let dt = time.delta_secs();
+    abandoned.0.retain(|_, (_, left)| {
+        *left -= dt;
+        *left > 0.0
+    });
 }
 
 /// Награда за жизнь в тяжёлой воде.

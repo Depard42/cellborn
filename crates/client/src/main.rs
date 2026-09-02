@@ -274,17 +274,52 @@ fn disconnect_client(mut commands: Commands, clients: Query<Entity, With<Client>
     }
 }
 
+/// Мёртвая зона стиков.
+///
+/// Без неё изношенный стик тянет тело в сторону, когда его никто не трогает, —
+/// и это выглядит не как поломка геймпада, а как поломка игры.
+const STICK_DEADZONE: f32 = 0.28;
+
 fn buffer_input(
     mut query: Query<&mut ActionState<Inputs>, With<InputMarker<Inputs>>>,
     keys: Res<ButtonInput<KeyCode>>,
+    pads: Query<&Gamepad>,
 ) {
     let Ok(mut state) = query.single_mut() else { return; };
-    let d = Direction {
+    let mut d = Direction {
         up: keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp),
         down: keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown),
         left: keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft),
         right: keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight),
     };
+
+    // Геймпад дополняет клавиатуру, а не заменяет: обе руки работают
+    // одновременно, и переключать «режим управления» нигде не нужно.
+    //
+    // Ввод остаётся четырьмя флагами, а не вектором, потому что таким его знает
+    // и сервер, и предсказание движения. Стик от этого теряет плавность, но
+    // сохранить одну общую формулу движения важнее: разойдись они — каждый ход
+    // заканчивался бы откатом.
+    for pad in &pads {
+        let x = pad.get(GamepadAxis::LeftStickX).unwrap_or(0.0);
+        let y = pad.get(GamepadAxis::LeftStickY).unwrap_or(0.0);
+        if x.abs() > STICK_DEADZONE {
+            d.right |= x > 0.0;
+            d.left |= x < 0.0;
+        }
+        if y.abs() > STICK_DEADZONE {
+            // На геймпаде «вверх» по стику — это вперёд, то есть −Z.
+            d.up |= y > 0.0;
+            d.down |= y < 0.0;
+        }
+        // Крестовина: ей удобнее целиться, чем стиком, и она даёт ровно те же
+        // четыре флага.
+        d.up |= pad.pressed(GamepadButton::DPadUp);
+        d.down |= pad.pressed(GamepadButton::DPadDown);
+        d.left |= pad.pressed(GamepadButton::DPadLeft);
+        d.right |= pad.pressed(GamepadButton::DPadRight);
+    }
+
     state.0 = Inputs::Direction(d);
 }
 
@@ -354,6 +389,7 @@ fn setup_camera(mut commands: Commands) {
 pub fn camera_control(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
+    pads: Query<&Gamepad>,
     mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
     player: Query<&PlayerPosition, With<Controlled>>,
     mut mode: ResMut<CameraMode>,
@@ -361,7 +397,8 @@ pub fn camera_control(
     // F — переключение. Из свободной всегда возвращаемся к своему телу, где бы
     // камера ни была: заблудиться в море и не найти себя — худшее, что может
     // случиться с обзором.
-    if keys.just_pressed(KeyCode::KeyF) {
+    let pad_toggle = pads.iter().any(|p| p.just_pressed(GamepadButton::RightThumb));
+    if keys.just_pressed(KeyCode::KeyF) || pad_toggle {
         *mode = match *mode {
             CameraMode::Follow => {
                 let here = player.single().map(|p| p.0).unwrap_or(Vec3::ZERO);
@@ -383,10 +420,27 @@ pub fn camera_control(
     for event in wheel.read() {
         *height = (*height - event.y * 4.0).clamp(8.0, 90.0);
     }
+    // На геймпаде масштаб — правый стик по вертикали: колеса у него нет.
+    for pad in &pads {
+        let zoom = pad.get(GamepadAxis::RightStickY).unwrap_or(0.0);
+        if zoom.abs() > STICK_DEADZONE {
+            *height = (*height - zoom * 40.0 * time.delta_secs()).clamp(8.0, 90.0);
+        }
+    }
 
     // Скорость полёта растёт с высотой: на общем плане шаг в метр незаметен.
     let speed = *height * 1.4 * time.delta_secs();
     let mut step = Vec3::ZERO;
+    for pad in &pads {
+        let x = pad.get(GamepadAxis::LeftStickX).unwrap_or(0.0);
+        let y = pad.get(GamepadAxis::LeftStickY).unwrap_or(0.0);
+        if x.abs() > STICK_DEADZONE {
+            step.x += x;
+        }
+        if y.abs() > STICK_DEADZONE {
+            step.z -= y;
+        }
+    }
     if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
         step.z -= 1.0;
     }
