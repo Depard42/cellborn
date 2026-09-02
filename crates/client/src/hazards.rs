@@ -22,9 +22,6 @@ pub struct ThornVisual;
 pub struct ThornSpine;
 
 #[derive(Component)]
-pub struct LeviathanVisual;
-
-#[derive(Component)]
 pub struct FeastVisual;
 
 /// Цвет колючки, которая тебя пропустит: спокойная зелень, «сюда можно».
@@ -54,7 +51,6 @@ pub fn plugin(app: &mut App) {
         (
             spawn_thorn_visuals,
             recolor_thorns,
-            spawn_leviathan_visuals,
             animate_leviathans,
             spawn_feast_visuals,
             animate_feasts,
@@ -227,82 +223,22 @@ fn recolor_thorns(
     }
 }
 
-fn spawn_leviathan_visuals(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    beasts: Query<(Entity, &Leviathan), Without<LeviathanVisual>>,
-) {
-    for (entity, beast) in &beasts {
-        commands.entity(entity).insert((
-            LeviathanVisual,
-            Transform::from_translation(beast.position),
-            Visibility::default(),
-        ));
-
-        // Тёмный силуэт без деталей: чудовище должно читаться как тень, идущая
-        // из мглы, а не как ещё одна клетка, только больше.
-        let skin = materials.add(StandardMaterial {
-            base_color: Color::srgb(0.06, 0.10, 0.14),
-            emissive: LinearRgba::new(0.02, 0.05, 0.08, 1.0),
-            perceptual_roughness: 0.9,
-            ..default()
-        });
-        let body = meshes.add(Sphere::new(beast.radius).mesh().uv(24, 16));
-        let fin = meshes.add(Sphere::new(beast.radius * 0.55).mesh().uv(12, 8));
-
-        commands.entity(entity).with_children(|parent| {
-            parent.spawn((
-                Transform::from_scale(Vec3::new(0.62, 0.45, 1.7)),
-                Mesh3d(body),
-                MeshMaterial3d(skin.clone()),
-            ));
-            for side in [-1.0f32, 1.0] {
-                parent.spawn((
-                    Transform::from_xyz(side * beast.radius * 0.7, 0.0, beast.radius * 0.2)
-                        .with_scale(Vec3::new(1.4, 0.18, 0.7)),
-                    Mesh3d(fin.clone()),
-                    MeshMaterial3d(skin.clone()),
-                ));
-            }
-        });
-    }
-}
-
-/// Чудовище должно плыть, а не скользить.
+/// Гигант — обычный организм, и рисует его общая система тел. Здесь остаётся
+/// только то, чего у обычного тела нет: упрямый курс и тяжёлая перевалка на
+/// ходу.
 ///
-/// Фаза хвоста приходит с сервера, поэтому все видят одно и то же существо:
-/// считай её клиент сам, у двух игроков рядом оно извивалось бы вразнобой.
-fn animate_leviathans(
-    beasts: Query<(&Leviathan, &Children, &mut Transform)>,
-    mut parts: Query<&mut Transform, Without<Leviathan>>,
-) {
-    for (beast, children, mut transform) in beasts {
-        transform.translation = beast.position;
-        // Смотрит туда, куда плывёт: иначе туша идёт боком.
+/// Раньше у него была своя отрисовка — тёмный силуэт с плавниками. Она ушла
+/// вместе с отдельной сущностью: гигант должен выглядеть как то, чем он
+/// является, — огромной клеткой, увешанной совершенными органами. По ней сразу
+/// видно, чем именно он опасен и что с ним можно сделать.
+fn animate_leviathans(mut beasts: Query<(&Leviathan, &mut Transform)>) {
+    for (beast, mut transform) in &mut beasts {
+        // Смотрит по курсу, а не по направлению движения: тело такого веса не
+        // виляет, оно идёт.
         let facing = Quat::from_rotation_arc(Vec3::NEG_Z, beast.heading);
-        // Тело переваливается на ходу — от этого туша выглядит тяжёлой.
-        let roll = (beast.swim * 0.5).sin() * 0.12;
+        // Перевалка на ходу — от неё туша читается тяжёлой.
+        let roll = (beast.swim * 0.5).sin() * 0.10;
         transform.rotation = facing * Quat::from_rotation_z(roll);
-
-        for (index, child) in children.iter().enumerate() {
-            let Ok(mut part) = parts.get_mut(child) else { continue };
-            match index {
-                // Туловище: медленный изгиб вдоль оси движения.
-                0 => {
-                    part.rotation = Quat::from_rotation_y(beast.swim.sin() * 0.10);
-                    // Наевшееся раздувается: по брюху видно, сколько оно съело.
-                    let belly = 1.0 + beast.fed * 0.06;
-                    part.scale = Vec3::new(0.62 * belly, 0.45 * belly, 1.7);
-                }
-                // Плавники бьют в противофазе друг другу.
-                _ => {
-                    let side = if index == 1 { 1.0 } else { -1.0 };
-                    part.rotation =
-                        Quat::from_rotation_z((beast.swim * 1.4 + side).sin() * 0.35 * side);
-                }
-            }
-        }
     }
 }
 

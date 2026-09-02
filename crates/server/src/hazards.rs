@@ -15,6 +15,7 @@ use lightyear::prelude::*;
 use rand::Rng;
 
 use crate::config::ServerConfig;
+use crate::life::{spawn_organism, Brain};
 
 /// Расставляет колючки один раз при старте мира.
 ///
@@ -77,7 +78,13 @@ pub fn thorn_damage(
     }
 }
 
-/// Раз в несколько минут через море проплывает чудовище.
+/// Раз в несколько минут через море проплывает гигант.
+///
+/// Это **обычный организм**, просто огромный и вкачанный: те же формулы, тот же
+/// бой, та же смерть. Раньше он был отдельной сущностью с собственным уроном —
+/// с ним нельзя было драться, и он оказывался не участником игры, а движущейся
+/// стеной. Стая, которая может его завалить, — это событие; стена событием быть
+/// не может.
 pub fn summon_leviathan(
     mut commands: Commands,
     config: Res<ServerConfig>,
@@ -101,8 +108,30 @@ pub fn summon_leviathan(
         return;
     }
 
+    // Тело гиганта собирается из тех же органов, что и любое другое, — просто
+    // их много и они совершенные. Отсюда и его сила: она не выдумана, а
+    // посчитана теми же формулами, что и у игрока.
+    let mut genome = Genome::starter_of(rng.random::<u64>());
+    for (family, count) in [
+        (PartFamily::Membrane, 5),
+        (PartFamily::Carapace, 4),
+        (PartFamily::Spike, 4),
+        (PartFamily::Nematocyst, 3),
+        (PartFamily::Mouth, 3),
+        (PartFamily::Flagellum, 4),
+        (PartFamily::Gill, 2),
+        (PartFamily::ThermalMembrane, 2),
+        (PartFamily::Osmoregulator, 2),
+        (PartFamily::StorageVacuole, 3),
+    ] {
+        for _ in 0..count {
+            genome.push_part(PartKind::new(family, PartLevel::Perfect));
+        }
+    }
+    let state = OrganismState::from_genome(genome);
+
     // Входит из-за края и уходит за противоположный, слегка наискось.
-    let edge = ARENA_HALF_EXTENT + LEVIATHAN_RADIUS * 2.0;
+    let edge = ARENA_HALF_EXTENT * 0.97;
     let along = rng.random_range(-ARENA_HALF_EXTENT..ARENA_HALF_EXTENT);
     let (from, heading) = if rng.random::<bool>() {
         let side = if rng.random::<bool>() { -1.0 } else { 1.0 };
@@ -114,114 +143,45 @@ pub fn summon_leviathan(
     let drift = rng.random_range(-0.35..0.35);
     let heading = (heading + heading.cross(Vec3::Y) * drift).normalize_or(heading);
 
-    commands.spawn((
-        Leviathan {
-            position: from,
-            heading,
-            radius: LEVIATHAN_RADIUS,
-            fed: 0.0,
-            swim: 0.0,
-        },
-        Replicate::to_clients(NetworkTarget::All),
-    ));
-    info!("через море идёт левиафан");
+    let mass = state.mass;
+    let entity = spawn_organism(&mut commands, state, from, None, Some(Brain::Wild));
+    commands.entity(entity).insert(Leviathan { heading, swim: 0.0, fed: 0.0 });
+
+    info!("через море идёт гигант: масса {mass:.0}");
 }
 
-/// Жизнь чудовища за один тик: куда оно повернуло, кого съело, что оставило.
+/// Ведёт гиганта через море.
 ///
-/// Оно не декорация и не движущаяся стена. Оно замечает добычу поблизости и
-/// лениво доворачивает к ней, глотает то, до чего дотянулось, наедается и
-/// теряет интерес, а за собой оставляет объедки — то, что не доело.
+/// Он живёт по общим правилам — ест, дерётся, умирает, — но не как местный:
+/// он **проходит насквозь**. Своего курса держится упрямо, а уйдя за
+/// противоположный край, исчезает совсем.
 pub fn leviathan_pass(
     mut commands: Commands,
     config: Res<ServerConfig>,
     time: Res<Time>,
-    mut beasts: Query<(Entity, &mut Leviathan)>,
-    mut organisms: Query<(&PlayerPosition, &mut OrganismState, &PlayerProgress)>,
+    mut beasts: Query<(Entity, &mut Leviathan, &mut PlayerPosition, &OrganismState)>,
 ) {
     let dt = time.delta_secs();
-    let gone = ARENA_HALF_EXTENT + LEVIATHAN_RADIUS * 3.0;
-    let mut rng = rand::rng();
+    let gone = ARENA_HALF_EXTENT * 1.02;
 
-    for (entity, mut beast) in &mut beasts {
-        // Хвост считается на сервере, чтобы все видели одно и то же существо.
-        beast.swim += dt * (1.6 + config.leviathan_speed * 0.12);
+    for (entity, mut beast, mut position, organism) in &mut beasts {
+        beast.swim += dt * 1.8;
 
-        // Кого оно заметило. Голодное сворачивает к ближайшему, сытое просто
-        // идёт своей дорогой.
-        if !beast.sated() {
-            let mut nearest = LEVIATHAN_INTEREST;
-            let mut toward = None;
-            for (position, _, progress) in &organisms {
-                if progress.dead {
-                    continue;
-                }
-                let offset = position.0 - beast.position;
-                let distance = offset.length();
-                // Только то, что впереди: разворачиваться назад оно не станет.
-                if distance < nearest && offset.dot(beast.heading) > 0.0 {
-                    nearest = distance;
-                    toward = Some(offset / distance.max(1e-3));
-                }
-            }
-            if let Some(toward) = toward {
-                // Доворот ограничен: от туши, вертящейся как истребитель, уйти
-                // невозможно, и событие превратилось бы в казнь.
-                let turn = (LEVIATHAN_TURN * dt).min(1.0);
-                beast.heading = beast.heading.lerp(toward, turn).normalize_or(beast.heading);
-            }
-        }
+        // Курс держится сам: обычное поведение бота увело бы его гоняться за
+        // едой, а он проплывает мимо. Это и делает его событием, а не жильцом.
+        let step = beast.heading * movement_speed(organism) * config.leviathan_speed * dt;
+        position.0 += step;
 
-        let step = beast.heading * config.leviathan_speed * dt;
-        beast.position += step;
-
-        // Ушёл за горизонт — исчез. Оно проплывает мимо, а не патрулирует.
-        if beast.position.x.abs() > gone || beast.position.z.abs() > gone {
+        // Ушёл за край — исчез. Никаких разворотов.
+        let out = position.0.x.abs() >= gone || position.0.z.abs() >= gone;
+        if out {
+            info!("гигант ушёл в открытое море");
             commands.entity(entity).despawn();
-            continue;
-        }
-
-        for (position, mut organism, progress) in &mut organisms {
-            if progress.dead {
-                continue;
-            }
-            let radius = body_radius(organism.mass);
-            if !beast.touches(position.0, radius) {
-                continue;
-            }
-            // Не бой, а несчастный случай: сопротивляться нечем, защита не
-            // помогает, шипы не отвечают. Можно только не попасться.
-            let before = organism.health;
-            organism.health = (organism.health - config.leviathan_damage * dt).max(0.0);
-            organism.combat_timer = config.combat_regen_block;
-
-            // Проглотило целиком — наелось и оставило объедки. Именно объедки
-            // делают его проход событием, а не просто опасностью: после него
-            // есть чем поживиться тем, кто держался в стороне.
-            if before > 0.0 && organism.health <= 0.0 {
-                beast.fed += 1.0;
-                let leftovers = LEVIATHAN_LEFTOVERS.min(4 + (organism.mass / 6.0) as usize);
-                for _ in 0..leftovers {
-                    let scatter = Vec3::new(
-                        rng.random_range(-3.5..3.5),
-                        rng.random_range(-0.4..0.9),
-                        rng.random_range(-3.5..3.5),
-                    );
-                    commands.spawn((
-                        Nutrient {
-                            kind: FoodKind::Detritus,
-                            energy: FoodKind::Detritus.energy(),
-                        },
-                        FoodPosition(position.0 + scatter),
-                        Replicate::to_clients(NetworkTarget::All),
-                    ));
-                }
-            }
         }
     }
 }
 
-/// Держит в море несколько лакомых мест и обновляет их по мере угасания.
+/// Держит в море несколько лакомых мест/// Держит в море несколько лакомых мест и обновляет их по мере угасания.
 pub fn maintain_feasts(
     mut commands: Commands,
     config: Res<ServerConfig>,

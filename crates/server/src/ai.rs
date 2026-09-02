@@ -156,7 +156,7 @@ pub fn bot_perception(
     food: Res<FoodGrid>,
     field: Res<PollutionField>,
     clouds: Query<&ToxinCloud>,
-    beasts: Query<&Leviathan>,
+    beasts: Query<(&PlayerPosition, &Leviathan)>,
     thorns: Query<&Thorn>,
     // One set: the snapshot of everyone, then the bots we actually steer. Both
     // touch PlayerPosition, so they cannot be two independent queries.
@@ -294,19 +294,18 @@ pub fn bot_perception(
             goal = food.nearest(here, config.bot_vision);
         }
 
-        // Левиафан — не противник, а погода: от него не отбиваются, от него
-        // уходят. Причём заранее и в сторону, а не по курсу: убегать по прямой
-        // от того, кто быстрее тебя, бессмысленно.
-        for beast in &beasts {
-            let offset = here - beast.position;
+        // Гигант — обычный организм, и обычная оценка «кто кого переживёт» уже
+        // велит от него бежать. Но бежать надо ВБОК: он идёт напролом и быстрее
+        // любой клетки, так что уходить по прямой от него бессмысленно.
+        for (beast_position, beast) in &beasts {
+            let offset = here - beast_position.0;
             let distance = offset.length();
-            if distance > beast.radius + config.bot_vision {
+            if distance > config.bot_vision * 1.6 {
                 continue;
             }
-            // Вбок от его курса, а не прочь от туши: так уходят с дороги.
             let sideways = beast.heading.cross(Vec3::Y).normalize_or(Vec3::X);
             let side = if sideways.dot(offset) < 0.0 { -1.0 } else { 1.0 };
-            let urgency = (beast.radius * 2.5 / distance.max(1.0)).min(6.0);
+            let urgency = (18.0 / distance.max(1.0)).min(6.0);
             escape += sideways * side * urgency;
         }
 
