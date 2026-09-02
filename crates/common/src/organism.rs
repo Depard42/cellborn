@@ -515,6 +515,65 @@ pub const AGGRESSION_THRESHOLD: u32 = 7;
 /// the line splits.
 pub const KIN_SPLIT_THRESHOLD: u32 = 15;
 
+/// Способность, которую игрок применяет сам.
+///
+/// Перк — это не орган. Орган работает всегда и сам, перк ждёт нажатия и потом
+/// молчит, пока не остынет. Отсюда и разница в ощущении: органы делают тебя
+/// таким, какой ты есть, а перк — это решение в конкретную секунду.
+///
+/// **Перезарядка зависит от массы.** Крупное тело копит силу дольше — и это
+/// единственное место, где масса мешает, а не помогает. Так у мелких остаётся
+/// то, чем они лучше больших.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum Perk {
+    /// Спрут: выброс ядовитого облака и рывок по направлению взгляда.
+    ///
+    /// Оружие догоняющего и убегающего сразу: облако остаётся позади, рывок
+    /// уносит вперёд. Что из этого важнее — решает тот, кто нажал.
+    Squid,
+    /// Продолжение рода: тело делится на три, каждое сохраняет большую часть
+    /// нажитого и получает ускорение.
+    ///
+    /// Способ разменять одно сильное тело на три быстрых — и единственный, в
+    /// котором игрок сам выбирает, когда это сделать.
+    Lineage,
+}
+
+impl Perk {
+    pub const ALL: [Perk; 2] = [Perk::Squid, Perk::Lineage];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Perk::Squid => "Спрут",
+            Perk::Lineage => "Продолжение рода",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Perk::Squid => "облако яда позади, рывок вперёд",
+            Perk::Lineage => "делишься на троих, каждый быстрее тебя",
+        }
+    }
+
+    /// Базовая перезарядка для тела стартовой массы, секунд.
+    pub fn base_cooldown(self) -> f32 {
+        match self {
+            Perk::Squid => 9.0,
+            Perk::Lineage => 75.0,
+        }
+    }
+
+    /// Перезарядка для тела такой массы.
+    ///
+    /// Растёт от массы: чем крупнее тело, тем реже оно способно на рывок.
+    /// Это единственное, чем мелкий лучше крупного, — и потому важное.
+    pub fn cooldown(self, mass: f32) -> f32 {
+        let bulk = 1.0 + (mass - BASE_MASS).max(0.0) * PERK_MASS_SLOWDOWN;
+        self.base_cooldown() * bulk
+    }
+}
+
 /// Сколько органов каждого семейства несёт тело: двадцать ячеек в порядке
 /// [`PartFamily::ALL`].
 ///
@@ -762,6 +821,11 @@ pub struct OrganismState {
     pub absorbed: f32,
     /// Counts down after taking damage; blocks healing while it runs.
     pub combat_timer: f32,
+    /// Сколько секунд осталось до готовности каждого перка.
+    ///
+    /// Хранится в теле, а не отдельно: перезарядка — свойство организма, и при
+    /// пересадке в потомка она должна переезжать вместе с ним.
+    pub perk_cooldowns: [f32; Perk::ALL.len()],
     pub temperature_tolerance: f32,
     pub salinity_tolerance: f32,
     pub toxin_resistance: f32,
@@ -785,6 +849,7 @@ impl Default for OrganismState {
             age: 0.0,
             absorbed: 0.0,
             combat_timer: 0.0,
+            perk_cooldowns: [0.0; Perk::ALL.len()],
             temperature_tolerance: BASE_TEMPERATURE_TOLERANCE,
             salinity_tolerance: BASE_SALINITY_TOLERANCE,
             toxin_resistance: BASE_TOXIN_RESISTANCE,
@@ -959,6 +1024,29 @@ impl OrganismState {
         self.recompute();
         self.grow_into_new_body(before);
         true
+    }
+
+    /// Готов ли перк к применению.
+    pub fn perk_ready(&self, perk: Perk) -> bool {
+        self.perk_cooldowns[perk as usize] <= 0.0
+    }
+
+    /// Ставит перк на перезарядку.
+    pub fn spend_perk(&mut self, perk: Perk) {
+        self.perk_cooldowns[perk as usize] = perk.cooldown(self.mass);
+    }
+
+    /// Двигает перезарядки. Зовётся раз в тик.
+    pub fn tick_perks(&mut self, dt: f32) {
+        for left in &mut self.perk_cooldowns {
+            *left = (*left - dt).max(0.0);
+        }
+    }
+
+    /// Доля готовности, 0..1 — для шкалы в интерфейсе.
+    pub fn perk_readiness(&self, perk: Perk) -> f32 {
+        let full = perk.cooldown(self.mass).max(0.01);
+        1.0 - (self.perk_cooldowns[perk as usize] / full).clamp(0.0, 1.0)
     }
 
     /// Converts absorbed energy into mutation points and returns how many were earned.

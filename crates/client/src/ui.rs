@@ -113,6 +113,18 @@ pub enum HudBar {
 #[derive(Component)]
 pub struct GameUi;
 
+/// Шкала готовности одной способности.
+#[derive(Component, Clone, Copy)]
+pub struct PerkGauge {
+    pub index: usize,
+}
+
+/// Подпись под шкалой способности.
+#[derive(Component, Clone, Copy)]
+pub struct PerkLabel {
+    pub index: usize,
+}
+
 #[derive(Component)]
 pub struct MutationPanel;
 
@@ -239,6 +251,60 @@ pub fn setup_hud(mut commands: Commands, font: Res<UiFont>, icons: Res<UiIcons>)
                 TextColor(LABEL),
                 HudLine::Environment,
             ));
+        });
+
+    // Способности: две шкалы внизу справа, где их видно, не отводя взгляда от
+    // собственного тела.
+    commands
+        .spawn((
+            GameUi,
+            Node {
+                position_type: PositionType::Absolute,
+                bottom: Val::Px(16.0),
+                right: Val::Px(16.0),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(6.0),
+                padding: UiRect::all(Val::Px(10.0)),
+                border_radius: BorderRadius::all(Val::Px(6.0)),
+                ..default()
+            },
+            BackgroundColor(PANEL),
+        ))
+        .with_children(|panel| {
+            for (index, (perk, key)) in Perk::ALL.iter().zip(["Z", "X"]).enumerate() {
+                panel.spawn((
+                    PerkLabel { index },
+                    Text::new(format!("{key} — {}", perk.name())),
+                    TextFont {
+                        font: FontSource::Handle(font.clone()),
+                        font_size: FontSize::Px(12.0),
+                        ..default()
+                    },
+                    TextColor(LABEL),
+                ));
+                panel
+                    .spawn((
+                        Node {
+                            width: Val::Px(190.0),
+                            height: Val::Px(7.0),
+                            border_radius: BorderRadius::all(Val::Px(4.0)),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.40)),
+                    ))
+                    .with_children(|track| {
+                        track.spawn((
+                            PerkGauge { index },
+                            Node {
+                                width: Val::Percent(100.0),
+                                height: Val::Percent(100.0),
+                                border_radius: BorderRadius::all(Val::Px(4.0)),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgb(0.85, 0.70, 0.35)),
+                        ));
+                    });
+            }
         });
 
     commands.spawn((
@@ -412,6 +478,53 @@ fn bar(panel: &mut ChildSpawnerCommands, kind: HudBar, color: Color, image: &Han
 /// тела она может ещё не доехать.
 type PlayerView<'a> =
     (&'a PlayerVitals, Option<&'a PlayerEnergy>, &'a PlayerProgress, &'a PlayerGenome);
+
+/// Обновляет шкалы способностей.
+///
+/// Готовность приходит с сервера: перезарядка живёт и тратится там, и клиент,
+/// считая её сам, показывал бы своё представление вместо правды.
+pub fn update_perks(
+    player: Query<(&PlayerPerks, &PlayerVitals), With<Controlled>>,
+    mut gauges: Query<(&mut Node, &mut BackgroundColor, &PerkGauge)>,
+    mut labels: Query<(&mut Text, &PerkLabel)>,
+) {
+    let view = player.single().ok();
+
+    for (mut node, mut color, gauge) in &mut gauges {
+        let ready = view
+            .and_then(|(perks, _)| perks.ready.get(gauge.index).copied())
+            .unwrap_or(0.0);
+        node.width = Val::Percent(ready * 100.0);
+        // Готовое светится, копящееся тускло: по цвету видно, можно ли жать,
+        // не читая процентов.
+        color.0 = if ready >= 1.0 {
+            Color::srgb(0.95, 0.80, 0.40)
+        } else {
+            Color::srgba(0.60, 0.50, 0.28, 0.75)
+        };
+    }
+
+    for (mut text, label) in &mut labels {
+        let Some(perk) = Perk::ALL.get(label.index) else { continue };
+        let key = ["Z", "X"][label.index.min(1)];
+        let value = match view {
+            Some((perks, vitals)) => {
+                let ready = perks.ready.get(label.index).copied().unwrap_or(0.0);
+                if ready >= 1.0 {
+                    format!("{key} — {}: готов", perk.name())
+                } else {
+                    // Показываем, сколько ещё ждать, а не долю: секунды понятнее.
+                    let full = perk.cooldown(vitals.mass);
+                    format!("{key} — {}: {:.0} с", perk.name(), full * (1.0 - ready))
+                }
+            }
+            None => format!("{key} — {}", perk.name()),
+        };
+        if text.0 != value {
+            text.0 = value;
+        }
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn update_hud(
@@ -689,6 +802,15 @@ pub fn control_input(
     // R — пересесть в самого развитого потомка.
     if keys.just_pressed(KeyCode::KeyR) {
         sender.send::<GameplayChannel>(MutationRequest::TakeOverOffspring);
+    }
+
+    // Q и E — способности. Не в панели мутаций: перк это решение в конкретную
+    // секунду, а не покупка, и лезть за ним в меню значит не успеть.
+    if keys.just_pressed(KeyCode::KeyZ) {
+        sender.send::<GameplayChannel>(MutationRequest::UsePerk(Perk::Squid));
+    }
+    if keys.just_pressed(KeyCode::KeyX) {
+        sender.send::<GameplayChannel>(MutationRequest::UsePerk(Perk::Lineage));
     }
 
     // F переключает камеру, и вместе с ней — кто ведёт тело. Уходя в свободный

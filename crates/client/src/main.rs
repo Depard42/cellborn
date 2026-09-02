@@ -206,6 +206,7 @@ fn main() {
             ui::mutation_navigation,
             ui::mutation_input,
             ui::control_input,
+            ui::update_perks,
         )
             .run_if(in_state(Screen::Game)),
     );

@@ -104,6 +104,7 @@ impl Plugin for ServerGamePlugin {
                     // Пачкают воду до того, как она их травит: иначе организм
                     // успевает уплыть из грязи, которую сам только что оставил.
                     life::pollute,
+                    life::tick_abilities,
                     life::survival,
                 )
                     .chain(),
@@ -259,16 +260,20 @@ fn movement(
         &PlayerProgress,
         &ActionState<Inputs>,
         Has<Predicted>,
+        Has<life::Haste>,
     )>,
 ) {
     let is_host = !host_server.is_empty();
     let dt = time.delta_secs();
-    for (mut pos, organism, progress, input, predicted) in &mut query {
+    for (mut pos, organism, progress, input, predicted, hasted) in &mut query {
         // In host-server mode the local player is already simulated by prediction.
         if (is_host && predicted) || progress.dead {
             continue;
         }
-        step_movement(&mut pos.0, &input.0.direction(), movement_speed(organism), dt);
+        // Ускорение после Продолжения рода: временное и заметное — ради него
+        // размен одного тела на три и имеет смысл.
+        let speed = movement_speed(organism) * if hasted { LINEAGE_HASTE } else { 1.0 };
+        step_movement(&mut pos.0, &input.0.direction(), speed, dt);
     }
 }
 
@@ -444,7 +449,8 @@ fn handle_mutation_requests(
                 // являются.
                 MutationRequest::TakeOverOffspring
                 | MutationRequest::HandOverToBot
-                | MutationRequest::TakeBackControl => {
+                | MutationRequest::TakeBackControl
+                | MutationRequest::UsePerk(_) => {
                     control.push((client, remote.0, request.clone()));
                     continue;
                 }
@@ -501,9 +507,10 @@ fn project_state(
         &mut PlayerVitals,
         &mut PlayerProgress,
         Option<&mut PlayerEnergy>,
+        Option<&mut PlayerPerks>,
     )>,
 ) {
-    for (organism, mut genome, mut vitals, mut progress, energy) in &mut query {
+    for (organism, mut genome, mut vitals, mut progress, energy, perks) in &mut query {
         if genome.0 != organism.genome {
             genome.0 = organism.genome.clone();
         }
@@ -529,6 +536,21 @@ fn project_state(
                 *energy = PlayerEnergy { energy: organism.energy, cap };
             }
         }
+        // Готовность способностей: считать её на клиенте нельзя, перезарядка
+        // живёт и тратится на сервере.
+        if let Some(mut perks) = perks {
+            let ready: Vec<f32> =
+                Perk::ALL.iter().map(|p| organism.perk_readiness(*p)).collect();
+            // Порог в сотую: шкала ползёт непрерывно, и без него компонент
+            // помечался бы изменённым каждый тик.
+            let changed = perks.ready.len() != ready.len()
+                || perks.ready.iter().zip(&ready).any(|(a, b)| (a - b).abs() > 0.01)
+                || ready.iter().zip(&perks.ready).any(|(a, b)| *a >= 1.0 && *b < 1.0);
+            if changed {
+                perks.ready = ready;
+            }
+        }
+
         if progress.points != organism.genome.mutation_points {
             progress.points = organism.genome.mutation_points;
         }

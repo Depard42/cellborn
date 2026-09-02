@@ -78,6 +78,27 @@ pub const CORPSE_NUTRIENTS: usize = 6;
 pub const MUTATION_PRICE_LINEAR: f32 = 0.14;
 pub const MUTATION_PRICE_QUADRATIC: f32 = 0.0;
 
+/// Насколько единица массы сверх стартовой удлиняет перезарядку перков.
+///
+/// Единственное место, где масса мешает. Всё остальное рост даёт: здоровье,
+/// урон, доступ к дорогим органам. Пусть у мелких останется хоть что-то, в чём
+/// они лучше, — иначе выбор «расти или остаться быстрым» перестанет быть
+/// выбором.
+pub const PERK_MASS_SLOWDOWN: f32 = 0.022;
+
+/// Насколько рывок Спрута быстрее обычного хода.
+pub const SQUID_DASH: f32 = 9.0;
+/// Сколько секунд длится рывок.
+pub const SQUID_DASH_TIME: f32 = 0.45;
+
+/// Сколько тел получается при Продолжении рода, считая исходное.
+pub const LINEAGE_SPLIT: usize = 3;
+/// Какую долю органов сохраняет каждое из них.
+pub const LINEAGE_KEEP: f32 = 0.70;
+/// Насколько они быстрее обычного, и сколько это длится.
+pub const LINEAGE_HASTE: f32 = 1.7;
+pub const LINEAGE_HASTE_TIME: f32 = 12.0;
+
 /// Minimum seconds between two accepted mutation requests from one client.
 pub const MUTATION_COOLDOWN: f32 = 0.25;
 /// Default cap on parts in one genome. The server can lower it in its config;

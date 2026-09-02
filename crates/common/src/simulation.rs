@@ -736,6 +736,47 @@ mod tests {
         }
     }
 
+    /// Перезарядка обязана расти с массой: это единственное, чем мелкий лучше
+    /// крупного, и без этого выбор «расти или остаться быстрым» перестаёт быть
+    /// выбором.
+    #[test]
+    fn heavy_bodies_recharge_slower() {
+        let small = OrganismState::default();
+        let mut genome = Genome::starter_of(1);
+        for _ in 0..14 {
+            genome.push_part(PartKind::basic(PartFamily::Carapace));
+        }
+        let heavy = OrganismState::from_genome(genome);
+        assert!(heavy.mass > small.mass * 3.0, "тело не выросло достаточно");
+
+        for perk in Perk::ALL {
+            let quick = perk.cooldown(small.mass);
+            let slow = perk.cooldown(heavy.mass);
+            assert!(
+                slow > quick * 1.5,
+                "{}: крупное тело перезаряжается почти так же быстро ({quick:.1} против {slow:.1})",
+                perk.name()
+            );
+        }
+    }
+
+    /// Способность тратится и восстанавливается, а не срабатывает бесконечно.
+    #[test]
+    fn a_perk_goes_on_cooldown_and_comes_back() {
+        let mut organism = OrganismState::default();
+        assert!(organism.perk_ready(Perk::Squid), "новорождённый без способности");
+
+        organism.spend_perk(Perk::Squid);
+        assert!(!organism.perk_ready(Perk::Squid), "способность не потратилась");
+        assert!(organism.perk_ready(Perk::Lineage), "потратилась не та способность");
+        assert!(organism.perk_readiness(Perk::Squid) < 0.1, "шкала врёт сразу после нажатия");
+
+        // Ждём ровно столько, сколько обещано.
+        organism.tick_perks(Perk::Squid.cooldown(organism.mass) + 0.01);
+        assert!(organism.perk_ready(Perk::Squid), "способность не вернулась вовремя");
+        assert!((organism.perk_readiness(Perk::Squid) - 1.0).abs() < 1e-3);
+    }
+
     /// Bodies must not be able to occupy the same water.
     #[test]
     fn overlapping_bodies_are_pushed_apart() {

@@ -48,6 +48,15 @@ pub struct PlayerEnergy {
     pub cap: f32,
 }
 
+/// Готовность способностей, 0..1 — только для тел игроков.
+///
+/// Считать её на клиенте нельзя: перезарядка живёт на сервере и тратится там
+/// же, а клиент узнал бы о нажатии соседа только по последствиям.
+#[derive(Component, Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PlayerPerks {
+    pub ready: Vec<f32>,
+}
+
 /// Progress and life state. `bites` is a counter, not a flag: the client compares
 /// it against the value it saw last frame to know that a bite happened, which is
 /// what triggers the eating animation without needing an event channel.
@@ -181,6 +190,8 @@ pub enum MutationRequest {
     HandOverToBot,
     /// Вернуть себе управление телом.
     TakeBackControl,
+    /// Применить способность.
+    UsePerk(crate::Perk),
 }
 
 /// Reliable ordered channel for gameplay requests.
@@ -227,6 +238,7 @@ impl Plugin for ProtocolPlugin {
         app.component::<PlayerGenome>().replicate();
         app.component::<PlayerVitals>().replicate();
         app.component::<PlayerEnergy>().replicate();
+        app.component::<PlayerPerks>().replicate();
         app.component::<PlayerProgress>().replicate();
         app.component::<Nutrient>().replicate();
         app.component::<FoodPosition>().replicate();

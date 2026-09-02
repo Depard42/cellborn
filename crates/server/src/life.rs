@@ -7,6 +7,7 @@ use bevy::prelude::*;
 use cellborn_common::*;
 
 use crate::config::ServerConfig;
+use lightyear::prelude::input::native::*;
 use lightyear::prelude::*;
 use rand::Rng;
 
@@ -107,6 +108,9 @@ pub fn spawn_organism(
                 // интерфейсе. У бота его никто не спрашивает, а меняется оно
                 // каждый тик — самое дорогое, что можно реплицировать зря.
                 vitals,
+                // Готовность способностей — тоже только игроку: боты перками
+                // не пользуются, и шкала им ни к чему.
+                PlayerPerks { ready: vec![1.0; Perk::ALL.len()] },
                 PredictionTarget::to_clients(NetworkTarget::Single(peer)),
                 InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(peer)),
                 ControlledBy { owner: link, lifetime: Default::default() },
@@ -613,6 +617,52 @@ pub fn deaths(
     }
 }
 
+/// Ускорение после Продолжения рода: временное и заметное.
+#[derive(Component)]
+pub struct Haste {
+    pub left: f32,
+}
+
+/// Рывок Спрута.
+#[derive(Component)]
+pub struct Dash {
+    pub direction: Vec3,
+    pub left: f32,
+}
+
+/// Двигает перезарядки способностей и временные эффекты.
+pub fn tick_abilities(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut organisms: Query<(Entity, &mut OrganismState, &mut PlayerPosition)>,
+    mut hastes: Query<(Entity, &mut Haste)>,
+    mut dashes: Query<(Entity, &mut Dash)>,
+) {
+    let dt = time.delta_secs();
+    for (_, mut organism, _) in &mut organisms {
+        organism.tick_perks(dt);
+    }
+    for (entity, mut haste) in &mut hastes {
+        haste.left -= dt;
+        if haste.left <= 0.0 {
+            commands.entity(entity).remove::<Haste>();
+        }
+    }
+    // Рывок двигает тело сам: это не изменение скорости, а бросок, и он должен
+    // работать, даже когда игрок отпустил клавиши.
+    for (entity, mut dash) in &mut dashes {
+        dash.left -= dt;
+        if dash.left <= 0.0 {
+            commands.entity(entity).remove::<Dash>();
+            continue;
+        }
+        if let Ok((_, organism, mut position)) = organisms.get_mut(entity) {
+            let speed = movement_speed(&organism) * SQUID_DASH;
+            step_movement_vec(&mut position.0, dash.direction, speed, dt);
+        }
+    }
+}
+
 /// Смена тела: пересадка в потомка и передача управления боту.
 ///
 /// Род — это линия, а не одно тело. Игрок должен уметь выбрать, каким её
@@ -625,14 +675,21 @@ pub fn handle_control_requests(
     mut commands: Commands,
     mut pending: ResMut<crate::ControlRequests>,
     mut players: Query<
-        (Entity, &PlayerId, &mut PlayerPosition, &mut OrganismState, &PlayerProgress),
+        (
+            Entity,
+            &PlayerId,
+            &mut PlayerPosition,
+            &mut OrganismState,
+            &PlayerProgress,
+            Option<&ActionState<Inputs>>,
+        ),
         Without<Brain>,
     >,
     offspring: Query<(Entity, &PlayerPosition, &OrganismState), (With<Brain>, Without<PlayerId>)>,
 ) {
     for (_, peer, request) in std::mem::take(&mut pending.0) {
-        let Some((entity, _, mut position, mut organism, progress)) =
-            players.iter_mut().find(|(_, id, _, _, _)| id.0 == peer)
+        let Some((entity, _, mut position, mut organism, progress, facing)) =
+            players.iter_mut().find(|(_, id, _, _, _, _)| id.0 == peer)
         else {
             continue;
         };
@@ -682,6 +739,90 @@ pub fn handle_control_requests(
                 commands.entity(entity).remove::<Brain>();
                 commands.entity(entity).remove::<BotState>();
                 info!("{peer:?} снова у руля");
+            }
+
+            MutationRequest::UsePerk(perk) => {
+                if !organism.perk_ready(perk) {
+                    continue;
+                }
+                organism.spend_perk(perk);
+
+                match perk {
+                    Perk::Squid => {
+                        // Облако остаётся там, где ты был, а рывок уносит
+                        // оттуда: в этом весь приём — оставить преследователю
+                        // отраву и уйти из неё сам.
+                        let emission = toxin_emission(&organism).max(0.10);
+                        commands.spawn((
+                            ToxinCloud {
+                                position: position.0,
+                                radius: TOXIN_RADIUS * 1.4,
+                                strength: emission * 5.0,
+                            },
+                            CloudLife(TOXIN_LIFETIME),
+                            Replicate::to_clients(NetworkTarget::All),
+                        ));
+                        // Рывок идёт туда, куда игрок держит курс. Ничего не
+                        // держит — вперёд по умолчанию: способность не должна
+                        // молча съедаться из-за отпущенной клавиши.
+                        let heading = facing
+                            .map(|input| {
+                                let d = input.0.direction();
+                                let mut v = Vec3::ZERO;
+                                if d.up {
+                                    v.z -= 1.0;
+                                }
+                                if d.down {
+                                    v.z += 1.0;
+                                }
+                                if d.left {
+                                    v.x -= 1.0;
+                                }
+                                if d.right {
+                                    v.x += 1.0;
+                                }
+                                v
+                            })
+                            .unwrap_or(Vec3::ZERO)
+                            .normalize_or(Vec3::NEG_Z);
+                        commands
+                            .entity(entity)
+                            .insert(Dash { direction: heading, left: SQUID_DASH_TIME });
+                    }
+
+                    Perk::Lineage => {
+                        // Тело разменивается на троих. Каждый сохраняет большую
+                        // часть нажитого и получает ускорение; игрок остаётся
+                        // за одним из них.
+                        let keep = ((organism.genome.parts.len() as f32 * LINEAGE_KEEP) as usize)
+                            .max(3);
+                        let mut lean = organism.genome.clone();
+                        lean.parts.truncate(keep);
+
+                        for index in 1..LINEAGE_SPLIT {
+                            let mut child = OrganismState::from_genome(lean.clone());
+                            child.energy = organism.energy * 0.5;
+                            let angle = index as f32 * std::f32::consts::TAU
+                                / LINEAGE_SPLIT as f32;
+                            let offset = Vec3::new(angle.cos(), 0.0, angle.sin())
+                                * (body_radius(child.mass) * 2.2);
+                            let born = spawn_organism(
+                                &mut commands,
+                                child,
+                                position.0 + offset,
+                                None,
+                                Some(Brain::Colony),
+                            );
+                            commands.entity(born).insert(Haste { left: LINEAGE_HASTE_TIME });
+                        }
+
+                        let points = organism.genome.mutation_points;
+                        *organism = OrganismState::from_genome(lean);
+                        organism.genome.mutation_points = points;
+                        commands.entity(entity).insert(Haste { left: LINEAGE_HASTE_TIME });
+                        info!("{peer:?} разделился на {LINEAGE_SPLIT}");
+                    }
+                }
             }
 
             // Мутации разбираются в другом месте.
