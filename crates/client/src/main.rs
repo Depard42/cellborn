@@ -28,6 +28,25 @@ use world::{palette, SEABED_Y};
 /// Camera position relative to the organism it follows.
 const CAMERA_OFFSET: Vec3 = Vec3::new(0.0, 11.0, 12.0);
 
+/// Как камера смотрит на мир.
+///
+/// Свободная камера нужна не для красоты: отдав тело боту, игрок должен уметь
+/// смотреть, как оно живёт, и разглядывать море целиком — где биомы, где
+/// толпа, куда идёт гигант. Привязанная к затылку камера этого не позволяет.
+#[derive(Resource, Default, PartialEq)]
+pub enum CameraMode {
+    /// За своим телом.
+    #[default]
+    Follow,
+    /// Свободный полёт: перемещение по карте и масштаб.
+    Free {
+        /// Куда смотрим.
+        target: Vec3,
+        /// Высота над целью — она же масштаб.
+        height: f32,
+    },
+}
+
 /// Камера, которая рисует мир в окно.
 ///
 /// С появлением камеры превью в атласе органов их стало две, и `With<Camera3d>`
@@ -107,6 +126,8 @@ fn main() {
     app.init_resource::<WorldUpdate>();
     app.init_resource::<ui::MutationSelection>();
     app.init_resource::<menu::WikiSelection>();
+    app.init_resource::<menu::AddressInput>();
+    app.init_resource::<CameraMode>();
     app.init_resource::<atlas::AtlasSelection>();
     app.init_state::<Screen>();
 
@@ -125,7 +146,9 @@ fn main() {
     app.add_systems(OnExit(Screen::Servers), menu::despawn::<menu::ServersRoot>);
     app.add_systems(
         Update,
-        (menu::update_servers, menu::servers_input).run_if(in_state(Screen::Servers)),
+        (menu::update_servers, menu::address_input, menu::servers_input)
+            .chain()
+            .run_if(in_state(Screen::Servers)),
     );
     app.add_systems(
         Update,
@@ -159,7 +182,9 @@ fn main() {
             body::deform_on_contact,
             body::animate_bodies,
             body::update_health_bars,
+            camera_control,
             follow_camera,
+            free_camera,
             world::spawn_food_visuals,
             world::animate_food,
             world::spawn_cloud_visuals,
@@ -180,6 +205,7 @@ fn main() {
             ui::update_mutation_panel,
             ui::mutation_navigation,
             ui::mutation_input,
+            ui::control_input,
         )
             .run_if(in_state(Screen::Game)),
     );
@@ -323,11 +349,88 @@ fn setup_camera(mut commands: Commands) {
 
 /// Follows the controlled organism and pulls back as it grows, so mass is felt as
 /// the world getting smaller.
+/// Управление свободной камерой и переключение режимов.
+pub fn camera_control(
+    time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
+    player: Query<&PlayerPosition, With<Controlled>>,
+    mut mode: ResMut<CameraMode>,
+) {
+    // F — переключение. Из свободной всегда возвращаемся к своему телу, где бы
+    // камера ни была: заблудиться в море и не найти себя — худшее, что может
+    // случиться с обзором.
+    if keys.just_pressed(KeyCode::KeyF) {
+        *mode = match *mode {
+            CameraMode::Follow => {
+                let here = player.single().map(|p| p.0).unwrap_or(Vec3::ZERO);
+                CameraMode::Free { target: here, height: 22.0 }
+            }
+            CameraMode::Free { .. } => CameraMode::Follow,
+        };
+    }
+
+    let CameraMode::Free { target, height } = &mut *mode else {
+        // Колесо в режиме слежения не копим: иначе оно «выстрелит» при
+        // следующем переключении.
+        wheel.clear();
+        return;
+    };
+
+    // Масштаб колесом. Пределы выбраны так, чтобы с верхней точки было видно
+    // заметную часть моря, а с нижней — отдельные тела.
+    for event in wheel.read() {
+        *height = (*height - event.y * 4.0).clamp(8.0, 90.0);
+    }
+
+    // Скорость полёта растёт с высотой: на общем плане шаг в метр незаметен.
+    let speed = *height * 1.4 * time.delta_secs();
+    let mut step = Vec3::ZERO;
+    if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
+        step.z -= 1.0;
+    }
+    if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown) {
+        step.z += 1.0;
+    }
+    if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
+        step.x -= 1.0;
+    }
+    if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
+        step.x += 1.0;
+    }
+    *target += step.normalize_or_zero() * speed;
+    // За край арены не улетаем: там смотреть не на что.
+    let edge = ARENA_HALF_EXTENT * 1.1;
+    target.x = target.x.clamp(-edge, edge);
+    target.z = target.z.clamp(-edge, edge);
+}
+
+/// Свободная камера: висит над выбранной точкой и смотрит вниз.
+pub fn free_camera(
+    time: Res<Time>,
+    mode: Res<CameraMode>,
+    mut camera: Query<&mut Transform, With<MainCamera>>,
+) {
+    let CameraMode::Free { target, height } = *mode else { return };
+    let Ok(mut transform) = camera.single_mut() else { return };
+
+    // Слегка наклонно, а не строго сверху: под прямым углом теряется объём и
+    // море превращается в схему.
+    let wanted = target + Vec3::new(0.0, height, height * 0.45);
+    let weight = 1.0 - (-7.0 * time.delta_secs()).exp();
+    transform.translation = transform.translation.lerp(wanted, weight);
+    transform.look_at(target, Vec3::Y);
+}
+
 fn follow_camera(
     time: Res<Time>,
+    mode: Res<CameraMode>,
     player: Query<(&PlayerPosition, &PlayerVitals), With<Controlled>>,
     mut camera: Query<&mut Transform, With<MainCamera>>,
 ) {
+    if *mode != CameraMode::Follow {
+        return;
+    }
     let Ok((player, vitals)) = player.single() else { return; };
     let Ok(mut transform) = camera.single_mut() else { return; };
     let zoom = 1.0 + (body_radius(vitals.mass) - body_radius(BASE_MASS)) * 0.9;

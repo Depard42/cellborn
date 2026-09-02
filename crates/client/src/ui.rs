@@ -250,7 +250,8 @@ pub fn setup_hud(mut commands: Commands, font: Res<UiFont>, icons: Res<UiIcons>)
             ..default()
         },
         Text::new(
-            "WASD - плыть   Tab - мутации   Q/E - орган   1-0 - вырастить   F1 - отладка",
+            "WASD - плыть   Tab - мутации   Q/E - орган   1-5 - вырастить\n\
+R - пересесть в потомка   F - свободная камера   L - рода   F1 - отладка",
         ),
         TextFont { font: FontSource::Handle(font.clone()), font_size: FontSize::Px(12.0), ..default() },
         TextColor(Color::srgba(0.74, 0.88, 0.90, 0.55)),
@@ -672,6 +673,33 @@ pub fn update_mutation_panel(
         } else {
             Color::srgba(1.0, 1.0, 1.0, 0.05)
         };
+    }
+}
+
+/// Смена тела: пересесть в потомка, отдать тело боту, забрать обратно.
+///
+/// Отдельно от панели мутаций: это не мутации, а решения о том, кем играть.
+pub fn control_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    mode: Res<crate::CameraMode>,
+    mut sender: Query<&mut MessageSender<MutationRequest>, With<Client>>,
+) {
+    let Ok(mut sender) = sender.single_mut() else { return };
+
+    // R — пересесть в самого развитого потомка.
+    if keys.just_pressed(KeyCode::KeyR) {
+        sender.send::<GameplayChannel>(MutationRequest::TakeOverOffspring);
+    }
+
+    // F переключает камеру, и вместе с ней — кто ведёт тело. Уходя в свободный
+    // полёт, игрок отдаёт тело боту: оно продолжает жить, а не замирает
+    // посреди моря беспомощным.
+    if keys.just_pressed(KeyCode::KeyF) {
+        let request = match *mode {
+            crate::CameraMode::Free { .. } => MutationRequest::HandOverToBot,
+            crate::CameraMode::Follow => MutationRequest::TakeBackControl,
+        };
+        sender.send::<GameplayChannel>(request);
     }
 }
 

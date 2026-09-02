@@ -613,6 +613,83 @@ pub fn deaths(
     }
 }
 
+/// Смена тела: пересадка в потомка и передача управления боту.
+///
+/// Род — это линия, а не одно тело. Игрок должен уметь выбрать, каким её
+/// представителем играть, и уметь отойти в сторону, не убивая нажитое.
+///
+/// Обе операции трогают две сущности сразу — свою и чужую, — поэтому живут
+/// отдельной системой, а не внутри обхода сообщений.
+#[allow(clippy::type_complexity)]
+pub fn handle_control_requests(
+    mut commands: Commands,
+    mut pending: ResMut<crate::ControlRequests>,
+    mut players: Query<
+        (Entity, &PlayerId, &mut PlayerPosition, &mut OrganismState, &PlayerProgress),
+        Without<Brain>,
+    >,
+    offspring: Query<(Entity, &PlayerPosition, &OrganismState), (With<Brain>, Without<PlayerId>)>,
+) {
+    for (_, peer, request) in std::mem::take(&mut pending.0) {
+        let Some((entity, _, mut position, mut organism, progress)) =
+            players.iter_mut().find(|(_, id, _, _, _)| id.0 == peer)
+        else {
+            continue;
+        };
+        if progress.dead {
+            continue;
+        }
+
+        match request {
+            MutationRequest::TakeOverOffspring => {
+                // Самый развитый из своих: пересаживаться имеет смысл только
+                // вверх, иначе это просто способ потерять тело.
+                let lineage = organism.genome.lineage;
+                let heir = offspring
+                    .iter()
+                    .filter(|(_, _, state)| state.genome.lineage == lineage)
+                    .filter(|(_, _, state)| state.genome.parts.len() > organism.genome.parts.len())
+                    .max_by_key(|(_, _, state)| state.genome.parts.len());
+
+                let Some((heir_entity, heir_position, heir_state)) = heir else {
+                    continue;
+                };
+
+                // Меняемся телами: прежнее не пропадает, оно достаётся колонии
+                // и продолжает жить ботом. Игрок переезжает, а не убивает.
+                let mine = organism.clone();
+                let my_place = position.0;
+
+                *organism = heir_state.clone();
+                // Очки не наследуются вместе с телом: они твои, а не его.
+                organism.genome.mutation_points = mine.genome.mutation_points;
+                position.0 = heir_position.0;
+
+                commands.entity(heir_entity).despawn();
+                spawn_organism(&mut commands, mine, my_place, None, Some(Brain::Colony));
+                info!("{peer:?} пересел в потомка: частей {}", organism.genome.parts.len());
+            }
+
+            MutationRequest::HandOverToBot => {
+                // Тело не замирает и не исчезает — оно продолжает жить ботом по
+                // тем же правилам. Именно поэтому свободная камера это
+                // наблюдение, а не пауза.
+                commands.entity(entity).insert((Brain::Wild, BotState::default()));
+                info!("{peer:?} отдал тело боту");
+            }
+
+            MutationRequest::TakeBackControl => {
+                commands.entity(entity).remove::<Brain>();
+                commands.entity(entity).remove::<BotState>();
+                info!("{peer:?} снова у руля");
+            }
+
+            // Мутации разбираются в другом месте.
+            MutationRequest::Grow(_) | MutationRequest::Upgrade(_) => {}
+        }
+    }
+}
+
 /// A dead player takes over one of its own offspring; with none left, it starts
 /// again from a fresh cell.
 pub fn respawn(

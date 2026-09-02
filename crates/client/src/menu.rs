@@ -72,6 +72,37 @@ pub struct ServerButton {
 #[derive(Component)]
 pub struct ServerList;
 
+/// Поле ручного ввода адреса.
+///
+/// Своё, а не готовый виджет: в Bevy текстового поля нет, а тащить ради одной
+/// строки целую библиотеку — дороже, чем написать сорок строк здесь.
+#[derive(Component)]
+pub struct AddressField;
+
+/// Что игрок уже набрал.
+#[derive(Resource, Default)]
+pub struct AddressInput {
+    pub text: String,
+    /// Почему адрес не принят. Пусто — всё в порядке.
+    pub error: &'static str,
+}
+
+impl AddressInput {
+    /// Разбирает набранное в адрес, дописывая порт по умолчанию.
+    ///
+    /// Игрок вводит «192.168.1.10», а не «192.168.1.10:5555» — требовать порт
+    /// значит требовать помнить его наизусть.
+    pub fn parse(&self) -> Option<std::net::SocketAddr> {
+        let text = self.text.trim();
+        if text.is_empty() {
+            return None;
+        }
+        text.parse()
+            .ok()
+            .or_else(|| format!("{text}:{}", cellborn_common::SERVER_PORT).parse().ok())
+    }
+}
+
 /// Подпись под кнопкой обновления: что сейчас происходит.
 #[derive(Component)]
 pub struct UpdateStatus;
@@ -311,8 +342,31 @@ pub fn setup_servers(
                 font,
                 12.0,
                 DIM,
-                "серверы в твоей сети находятся сами; Esc — назад",
+                "серверы в твоей сети находятся сами; можно и вписать адрес руками\nEnter — подключиться, Esc — назад",
             ));
+            // Поле адреса: набирается с клавиатуры, Enter подключает.
+            root.spawn((
+                AddressField,
+                Node {
+                    width: Val::Px(430.0),
+                    justify_content: JustifyContent::Center,
+                    padding: UiRect::all(Val::Px(9.0)),
+                    margin: UiRect::top(Val::Px(10.0)),
+                    border: UiRect::all(Val::Px(1.0)),
+                    border_radius: BorderRadius::all(Val::Px(5.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.35)),
+                BorderColor::all(Color::srgba(0.42, 0.88, 0.72, 0.45)),
+                Text::new(""),
+                TextFont {
+                    font: FontSource::Handle(font.clone()),
+                    font_size: FontSize::Px(14.0),
+                    ..default()
+                },
+                TextColor(INK),
+            ));
+
             root.spawn((
                 ServerList,
                 Node {
@@ -402,10 +456,63 @@ pub fn update_servers(
     });
 }
 
+/// Набор адреса с клавиатуры.
+///
+/// Читаем логические клавиши, а не коды: так «точка» остаётся точкой при любой
+/// раскладке, и цифры на основном ряду не отличаются от цифр на дополнительном.
+pub fn address_input(
+    mut typed: MessageReader<bevy::input::keyboard::KeyboardInput>,
+    mut input: ResMut<AddressInput>,
+    mut field: Query<&mut Text, With<AddressField>>,
+) {
+    use bevy::input::keyboard::Key;
+
+    for event in typed.read() {
+        if !event.state.is_pressed() {
+            continue;
+        }
+        match &event.logical_key {
+            Key::Backspace => {
+                input.text.pop();
+                input.error = "";
+            }
+            Key::Character(chars) => {
+                for c in chars.chars() {
+                    // Только то, из чего состоит адрес: буквы имени, цифры,
+                    // точки, двоеточие и дефис. Остальное — опечатка.
+                    if c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '-') {
+                        // Длиннее полусотни адрес не бывает, а поле не должно
+                        // расползаться на весь экран.
+                        if input.text.len() < 48 {
+                            input.text.push(c);
+                            input.error = "";
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if let Ok(mut text) = field.single_mut() {
+        let value = if input.text.is_empty() {
+            "впиши адрес: 192.168.1.10 или 192.168.1.10:5555".to_string()
+        } else if input.error.is_empty() {
+            format!("{}▏", input.text)
+        } else {
+            format!("{}▏   — {}", input.text, input.error)
+        };
+        if text.0 != value {
+            text.0 = value;
+        }
+    }
+}
+
 /// Выбор сервера: подключаемся и запоминаем.
 pub fn servers_input(
     buttons: Query<(&Interaction, &ServerButton), Changed<Interaction>>,
     keys: Res<ButtonInput<KeyCode>>,
+    mut typed: ResMut<AddressInput>,
     mut server: ResMut<crate::ServerAddress>,
     mut settings: ResMut<crate::settings::Settings>,
     mut next: ResMut<NextState<Screen>>,
@@ -413,6 +520,19 @@ pub fn servers_input(
     if keys.just_pressed(KeyCode::Escape) {
         next.set(Screen::Menu);
         return;
+    }
+
+    // Enter подключает к тому, что набрано руками.
+    if keys.just_pressed(KeyCode::Enter) && !typed.text.trim().is_empty() {
+        match typed.parse() {
+            Some(address) => {
+                server.0 = address;
+                settings.remember(&address.to_string(), "вручную");
+                next.set(Screen::Game);
+                return;
+            }
+            None => typed.error = "не похоже на адрес",
+        }
     }
 
     for (interaction, button) in &buttons {
@@ -826,5 +946,40 @@ pub fn game_escape(keys: Res<ButtonInput<KeyCode>>, mut next: ResMut<NextState<S
 pub fn despawn<T: Component>(mut commands: Commands, query: Query<Entity, With<T>>) {
     for entity in &query {
         commands.entity(entity).despawn();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Игрок вводит адрес так, как его помнит, — обычно без порта. Требовать
+    /// порт значит требовать помнить наизусть то, что почти всегда одно и то же.
+    #[test]
+    fn an_address_without_a_port_still_works() {
+        let mut input = AddressInput::default();
+
+        input.text = "192.168.1.10".into();
+        let parsed = input.parse().expect("адрес без порта не принят");
+        assert_eq!(parsed.port(), cellborn_common::SERVER_PORT);
+        assert_eq!(parsed.ip().to_string(), "192.168.1.10");
+
+        // С портом — берётся указанный, а не подставленный.
+        input.text = "192.168.1.10:6000".into();
+        assert_eq!(input.parse().expect("адрес с портом не принят").port(), 6000);
+
+        // Пробелы по краям не должны мешать: их легко зацепить при вставке.
+        input.text = "  127.0.0.1  ".into();
+        assert!(input.parse().is_some(), "пробелы сломали разбор");
+    }
+
+    /// Мусор не должен превращаться в подключение неизвестно куда.
+    #[test]
+    fn rubbish_is_not_an_address() {
+        let mut input = AddressInput::default();
+        for junk in ["", "   ", "привет", "999.999.999.999", ":::", "1.2.3.4:99999"] {
+            input.text = junk.into();
+            assert!(input.parse().is_none(), "«{junk}» принято за адрес");
+        }
     }
 }

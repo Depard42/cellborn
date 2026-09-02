@@ -45,6 +45,10 @@ fn bind_addr(port: u16) -> std::net::SocketAddr {
 #[derive(Resource, Default)]
 struct RequestCooldowns(HashMap<Entity, f32>);
 
+/// Запросы на смену тела, накопленные за кадр.
+#[derive(Resource, Default)]
+struct ControlRequests(Vec<(Entity, PeerId, MutationRequest)>);
+
 /// Накопленное время жизни в тяжёлой воде — для награды за приспособленность.
 ///
 /// Раньше очки давали за пережитую смену сезона. Сезонов больше нет, а награда
@@ -60,6 +64,7 @@ impl Plugin for ServerGamePlugin {
         app.insert_resource(config);
         app.insert_resource(ReplicationMetadata::new(SEND_INTERVAL));
         app.init_resource::<RequestCooldowns>();
+        app.init_resource::<ControlRequests>();
         app.init_resource::<FoodGrid>();
         app.init_resource::<TickClock>();
         app.init_resource::<PollutionField>();
@@ -127,7 +132,11 @@ impl Plugin for ServerGamePlugin {
             )
                 .chain(),
         );
-        app.add_systems(Update, (handle_mutation_requests, discovery::answer_probes));
+        app.add_systems(
+            Update,
+            (handle_mutation_requests, life::handle_control_requests, discovery::answer_probes)
+                .chain(),
+        );
         app.add_observer(on_new_client);
         app.add_observer(on_connected);
     }
@@ -401,13 +410,19 @@ fn spawn_food(
 
 /// Validates mutation requests. The client is trusted for nothing here: not the
 /// cost, not the balance, not even which organism it is asking about.
+#[allow(clippy::type_complexity)]
 fn handle_mutation_requests(
     config: Res<ServerConfig>,
     time: Res<Time>,
     mut cooldowns: ResMut<RequestCooldowns>,
+    mut pending: ResMut<ControlRequests>,
     mut receivers: Query<(Entity, &mut MessageReceiver<MutationRequest>, &RemoteId), With<ClientOf>>,
     mut organisms: Query<(&PlayerId, &mut OrganismState, &PlayerProgress)>,
 ) {
+    // Запросы на смену тела копятся здесь и разбираются отдельной системой:
+    // они трогают несколько сущностей сразу, и делать это посреди обхода
+    // сообщений было бы дороже и запутаннее.
+    let control = &mut pending.0;
     let now = time.elapsed_secs();
     for (client, mut receiver, remote) in &mut receivers {
         for request in receiver.receive() {
@@ -424,6 +439,15 @@ fn handle_mutation_requests(
                 continue;
             }
             let accepted = match request {
+                // Пересадка в потомка и передача тела боту обрабатываются
+                // отдельно: они трогают не одно тело, а два, и мутациями не
+                // являются.
+                MutationRequest::TakeOverOffspring
+                | MutationRequest::HandOverToBot
+                | MutationRequest::TakeBackControl => {
+                    control.push((client, remote.0, request.clone()));
+                    continue;
+                }
                 MutationRequest::Grow(kind) => {
                     // The genome enforces its own ceiling; this is the server's,
                     // which may be lower than what the client is drawing against.
